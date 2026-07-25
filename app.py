@@ -1,5 +1,9 @@
 """Streamlit UI. `uv run streamlit run app.py`"""
+import sys
 from datetime import date
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))  # 배포 시 editable 설치 없이도 임포트
 
 import streamlit as st
 
