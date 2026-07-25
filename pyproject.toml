@@ -2,7 +2,7 @@
 name = "etf-agent"
 version = "0.1.0"
 description = "ETF 투자 리서치 어시스턴트 (MVP: structured path)"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"  # tokenizers(langchain-upstage)가 3.14 wheel 없음 → 3.13 이하 강제
 dependencies = [
     "yfinance>=1.5,<2",
     "streamlit>=1.40",
