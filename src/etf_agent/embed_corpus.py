@@ -43,9 +43,13 @@ MANIFEST = [
 ]
 
 # 긴 페이지만 쪼갠다. 대부분 페이지는 이보다 짧아 통째로 남는다(표 보존).
-_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000, chunk_overlap=150, length_function=len,
-    separators=["\n\n", "\n", " ", ""])
+CHUNK_SIZE, CHUNK_OVERLAP = 1000, 150  # 스윕(eval/sweep.py)에서 이 값을 바꿔가며 비교
+
+
+def _make_splitter(chunk_size: int, chunk_overlap: int) -> RecursiveCharacterTextSplitter:
+    return RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap, length_function=len,
+        separators=["\n\n", "\n", " ", ""])
 
 
 def _section(page_text: str) -> str:
@@ -57,7 +61,8 @@ def _section(page_text: str) -> str:
     return ""
 
 
-def build_documents() -> list[Document]:
+def build_documents(chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP) -> list[Document]:
+    splitter = _make_splitter(chunk_size, chunk_overlap)
     docs = []
     for fname, pages, category, source in MANIFEST:
         with pdfplumber.open(CORPUS / fname) as pdf:
@@ -68,7 +73,7 @@ def build_documents() -> list[Document]:
                 section = _section(text)
                 header = f"[{source} · {section}]"  # contextual: 조각이 자기 출처·섹션을 알게
                 meta = {"source": source, "section": section, "page": pno, "category": category}
-                for piece in _splitter.split_text(text):
+                for piece in splitter.split_text(text):
                     docs.append(Document(page_content=f"{header}\n{piece}", metadata=meta))
     return docs
 

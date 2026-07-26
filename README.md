@@ -53,18 +53,59 @@ uv run python -m etf_agent.embed_corpus
 uv run streamlit run app.py
 ```
 
+## RAG 코퍼스 출처
+
+전부 공개 자료에서 **관련 페이지만 선별**해 인덱싱한다(표가 반토막 나지 않게 페이지 단위, 긴 페이지만 분할). 선별 목록은 [`embed_corpus.py`](src/etf_agent/embed_corpus.py)의 `MANIFEST`에 코드로 고정.
+
+| 출처 | 기관 | 카테고리 | 다루는 내용 |
+|---|---|---|---|
+| 해외주식 양도소득세 안내 | 국세청 | `tax` | 해외 상장 ETF 양도세·기본공제·종합과세 |
+| 해외 ETF 세금 국내외 비교 | 미래에셋증권 | `tax` | 국내상장 해외ETF vs 해외상장 ETF, 연금계좌 과세이연 |
+| 환헤지 ETF 가이드 | 미래에셋증권 | `concept` | `(H)` 표시 의미, 환헤지 비용 발생 구조 |
+| ETF 핸드북 (한글) | HKEX | `concept`·`risk` | 추적오차·괴리율·TER·LP/AP, 레버리지·인버스 위험 |
+| ETF 용어 해설 | 금융감독원 | `concept` | 분배금·분배락·총보수 등 기본 용어 |
+| 파생상품 ETF 위험고지서 | 신한투자증권 | `risk` | 레버리지·인버스 음의 복리효과 |
+| 상장폐지 요건 (일괄신고서) | 하나로 | `risk` | 순자산 미달 등 ETF 상장폐지 조건 |
+| ETF Tour Guide ③ 섹터 모멘텀 | 대신증권 | `sector`·`strategy` | GICS 섹터 경기/금리/달러 민감도, 듀얼 모멘텀 전략 |
+
+선별 결과 **69청크** — 카테고리별 `tax` 13 · `concept` 28 · `risk` 9 · `sector` 14 · `strategy` 5.
+
 ## 테스트 & 평가
 
 ```bash
 uv run pytest                        # 31 tests
-uv run python eval/eval_retrieval.py # RAG 검색 평가 (recall@3 / MRR / category)
+uv run python eval/eval_retrieval.py # RAG 검색 평가 (recall@k / MRR / category)
+uv run python eval/sweep.py          # 청킹·k 파라미터 스윕
 ```
+
+### 검색 평가 지표 ([`eval/eval_retrieval.py`](eval/eval_retrieval.py))
+
+앱과 **동일한 FAISS 인덱스**를 그대로 호출한다(eval=프로덕션). 골드셋은 22개 질문으로, 용어 구분·위험 vs 개념 경계 같은 어려운 케이스를 일부러 섞었다.
+
+- **recall@k** — 상위 k개 결과 안에 정답 출처 문서가 들어왔는가 (검색 누락 측정).
+- **MRR** — 정답 출처가 처음 등장하는 순위의 역수 평균 (1.0 = 항상 1등, 순위 품질 측정).
+- **top-1 category** — 1등 결과의 카테고리(`tax`/`concept`/`risk`/`sector`/`strategy`)가 기대와 일치하는가 (라우팅 정확도).
+
+현재: **recall@3 22/22 (100%) · MRR 1.000 · category 22/22 (100%)**.
+
+### 파라미터 스윕 ([`eval/sweep.py`](eval/sweep.py))
+
+과제 요건인 "프롬프트·chunk size·overlap·retrieve(k) 파라미터를 바꿔가며 결과 차이 확인"을 정량화. 골드셋을 재활용해 청킹 파라미터별로 인메모리 FAISS를 재빌드하고 recall/MRR을 뽑는다(프로덕션 인덱스는 건드리지 않음).
+
+| chunk/overlap | #chunks | R@1 | R@3 | R@5 | MRR | cat@1 |
+|---|---|---|---|---|---|---|
+| 400 / 100 | 169 | 22/22 | 22/22 | 22/22 | 1.000 | 22/22 |
+| 700 / 150 | 101 | 22/22 | 22/22 | 22/22 | 1.000 | 22/22 |
+| **1000 / 150** (현재) | 69 | 22/22 | 22/22 | 22/22 | 1.000 | 22/22 |
+| 1500 / 200 | 54 | 22/22 | 22/22 | 22/22 | 1.000 | 22/22 |
+
+**해석:** 정선된 소규모 코퍼스(8종·69페이지)에서는 각 청크에 `[출처·섹션]` 헤더를 붙여 태깅하므로 **chunk size·overlap·k가 검색 recall을 바꾸지 않는다**(전 구간 100%). 정답이 항상 1등이라 k도 recall엔 무의미하며, k가 실제로 조절하는 건 LLM에 넘기는 맥락의 양(precision)이다. 결과 품질을 실제로 가르는 파라미터는 **오프토픽 거절 임계값 `MIN_SCORE`**로, 정답 통과(≥0.39)와 오프토픽 차단(비트코인 0.27·날씨 0.18)을 모두 만족하는 **0.35로 실측 튜닝**했다([retrieval.py](src/etf_agent/retrieval.py#L11-L14)).
 
 ## 데이터 정책
 
 - **캐시 스냅샷:** 질의 시 네트워크를 치지 않는다. `ingest*`를 일 1회 재실행해 갱신(멱등). 기준일이 7일 초과하면 UI가 경고.
 - **저장소 제외:** PDF 코퍼스·SQLite 캐시·FAISS 인덱스는 `.gitignore` 처리(용량·저작권). 위 3·4단계로 재생성한다.
-- **RAG 코퍼스:** 국세청/미래에셋/HKEX/금감원/신한/하나로/대신증권 등 공개 자료에서 페이지 선별. 카테고리: `tax`·`concept`·`risk`·`sector`·`strategy`.
+- **RAG 코퍼스:** 공개 자료에서 관련 페이지만 선별([출처 표](#rag-코퍼스-출처) 참고).
 
 ## 다루지 않는 것
 
