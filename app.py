@@ -13,8 +13,8 @@ from etf_agent.charts import as_of, chart_for
 STALE_DAYS = 7  # 이보다 오래된 스냅샷이면 UI에 갱신 경고
 
 EXAMPLES = [
-    "한국에 투자하는 ETF랑 주요 종목/섹터 알려줘",
-    "반도체 비중 높은 나라 순위 알려줘",
+    "중국에 투자하고 싶은데 이 나라의 종목과 섹터 비율을 알려줘",
+    "환헤지 ETF의 (H)가 무슨 뜻이야?",
     "비트코인 살까?",
 ]
 
