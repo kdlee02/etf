@@ -12,7 +12,8 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from .prompts import SYSTEM_INSTRUCTION, UNGROUNDED_INSTRUCTION
+from .prompts import (ROUTER_INSTRUCTION, SYSTEM_INSTRUCTION,
+                       UNGROUNDED_INSTRUCTION, WEB_INSTRUCTION)
 from .tools import TOOLS
 from .universe import COUNTRY_ETFS, SECTOR_KO_MAP
 
@@ -209,6 +210,36 @@ def _run_scoped(question: str) -> Answer:
 
     final = client.chat.completions.create(model=MODEL, messages=messages, temperature=0)
     text = _reground(final.choices[0].message.content or "답변을 생성하지 못했습니다.", trace, client, messages)
+    return Answer(text=_with_disclaimer(text), tool_calls=trace)
+
+
+def _classify(question: str) -> str:
+    """질문을 'scoped' 또는 'web'으로 분류. 애매하면 scoped(안전 쪽 = 기존 동작 유지)."""
+    client = _client()
+    resp = client.chat.completions.create(
+        model=MODEL, temperature=0,
+        messages=[{"role": "system", "content": ROUTER_INSTRUCTION},
+                  {"role": "user", "content": question}])
+    label = (resp.choices[0].message.content or "").strip().lower()
+    return "web" if "web" in label else "scoped"
+
+
+def _run_web(question: str) -> Answer:
+    """오프토픽 질문을 웹검색 결과로 답한다. 사실만 + 고지, 매수/매도 조언 금지."""
+    from .websearch import web_search  # 지연 임포트: 순환 회피
+    hits = web_search(question)
+    trace = [ToolCall("web_search", {"query": question}, hits)]
+    if not hits.get("found"):
+        text = "제공된 데이터에 없어 웹에서 찾아봤지만 신뢰할 만한 결과를 얻지 못했습니다."
+        return Answer(text=_with_disclaimer(text), tool_calls=trace)
+    client = _client()
+    ctx = json.dumps(hits["results"], ensure_ascii=False)
+    resp = client.chat.completions.create(
+        model=MODEL, temperature=0,
+        messages=[{"role": "system", "content": WEB_INSTRUCTION},
+                  {"role": "user", "content": f"질문: {question}\n\n웹 검색 결과:\n{ctx}"}])
+    body = resp.choices[0].message.content or "검색 결과를 정리하지 못했습니다."
+    text = f"🔎 웹에서 검색한 결과입니다.\n\n{body}"
     return Answer(text=_with_disclaimer(text), tool_calls=trace)
 
 
