@@ -47,3 +47,12 @@ def test_web_search_soft_fails_without_key(monkeypatch):
     monkeypatch.delenv("TAVILEY_API_KEY", raising=False)
     out = ws.web_search("아무거나")
     assert out["found"] is False
+
+
+def test_web_search_soft_fails_on_non_dict_body(monkeypatch):
+    monkeypatch.setenv("TAVILEY_API_KEY", "x")
+    monkeypatch.setattr(ws, "_load_env", lambda: None)
+    monkeypatch.setattr(ws.urllib.request, "urlopen",
+                        lambda *a, **k: FakeResp(["not", "a", "dict"]))
+    out = ws.web_search("아무거나")
+    assert out["found"] is False

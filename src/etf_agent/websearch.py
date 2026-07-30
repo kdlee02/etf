@@ -4,7 +4,6 @@ transitive `requests` 대신 stdlib urllib 사용 (신규/전이 의존성 회�
 """
 import json
 import os
-import urllib.error
 import urllib.request
 
 _ENDPOINT = "https://api.tavily.com/search"
@@ -32,8 +31,10 @@ def web_search(query: str) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+    except (OSError, ValueError) as e:
         return {"found": False, "reason": f"웹검색 실패: {type(e).__name__}"}
+    if not isinstance(data, dict):
+        return {"found": False, "reason": "웹검색 응답 형식 오류"}
     results = [{"title": r.get("title", ""), "url": r.get("url", ""),
                 "content": r.get("content", "")}
                for r in data.get("results", [])]
