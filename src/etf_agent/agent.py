@@ -249,7 +249,8 @@ def ask(question: str, grounded: bool = True) -> Answer:
         return _run_ungrounded(question)
     if reask := _bare_topic(question):
         return Answer(text=_with_disclaimer(reask))  # 도구 없이 되묻는다 — 근거도 없다
-    return _run_scoped(question)
+    from .graph import route  # 지연 임포트: agent <-> graph 순환 회피
+    return route(question)
 
 
 if __name__ == "__main__":

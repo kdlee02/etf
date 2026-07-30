@@ -53,6 +53,7 @@ def test_tool_calls_are_paired_by_id(fake, monkeypatch):
     agent.TOOLS[0].__name__ = "get_top_holdings"
     agent.TOOLS[1].__name__ = "get_sector_weights"
     fake(
+        FakeMessage(content="scoped"),  # ← 추가: 분류기 응답
         FakeMessage(tool_calls=[tool_call("c1", "get_top_holdings", {"ticker": "EWY"}),
                                 tool_call("c2", "get_sector_weights", {"ticker": "EWY"})]),
         FakeMessage(content="완료"),
@@ -67,6 +68,7 @@ def test_tool_results_are_sent_back_with_matching_id(fake, monkeypatch):
     monkeypatch.setattr(agent, "TOOLS", [lambda ticker: {"found": True}])
     agent.TOOLS[0].__name__ = "get_sector_weights"
     client = fake(
+        FakeMessage(content="scoped"),  # ← 추가: 분류기 응답
         FakeMessage(tool_calls=[tool_call("abc123", "get_sector_weights", {"ticker": "EWY"})]),
         FakeMessage(content="완료"),
     )
@@ -97,7 +99,10 @@ def test_real_questions_are_not_treated_as_topics(question):
 
 def test_no_tool_calls_returns_empty_trace(fake):
     """거절/재질의는 도구를 안 부른다 — 근거 패널이 '근거 없음'을 보여줄 수 있어야 한다."""
-    fake(FakeMessage(content="제공된 데이터에 없습니다. 투자 권유가 아닙니다."))
+    fake(
+        FakeMessage(content="scoped"),  # ← 추가: 분류기 응답
+        FakeMessage(content="제공된 데이터에 없습니다. 투자 권유가 아닙니다."),
+    )
     answer = agent.ask("비트코인 살까?")
     assert answer.tool_calls == []
     assert "제공된 데이터에 없습니다" in answer.text
@@ -107,6 +112,7 @@ def test_unknown_tool_name_does_not_crash(fake, monkeypatch):
     """모델이 없는 도구를 지어내도 루프가 깨지면 안 된다."""
     monkeypatch.setattr(agent, "TOOLS", [])
     fake(
+        FakeMessage(content="scoped"),  # ← 추가: 분류기 응답
         FakeMessage(tool_calls=[tool_call("c1", "get_bitcoin_price", {})]),
         FakeMessage(content="그건 없습니다"),
     )
@@ -119,6 +125,7 @@ def test_bad_arguments_do_not_crash(fake, monkeypatch):
     monkeypatch.setattr(agent, "TOOLS", [lambda ticker: {"found": True}])
     agent.TOOLS[0].__name__ = "get_sector_weights"
     fake(
+        FakeMessage(content="scoped"),  # ← 추가: 분류기 응답
         FakeMessage(tool_calls=[tool_call("c1", "get_sector_weights", {"wrong_arg": "x"})]),
         FakeMessage(content="오류"),
     )
@@ -133,7 +140,8 @@ def test_malformed_json_arguments_do_not_crash(fake, monkeypatch):
     agent.TOOLS[0].__name__ = "get_sector_weights"
     bad = NS(id="c1", type="function",
              function=NS(name="get_sector_weights", arguments="{not json"))
-    fake(FakeMessage(tool_calls=[bad]), FakeMessage(content="완료"))
+    fake(FakeMessage(content="scoped"),  # ← 추가: 분류기 응답
+         FakeMessage(tool_calls=[bad]), FakeMessage(content="완료"))
     assert agent.ask("뭔가").tool_calls[0].args == {}
 
 
