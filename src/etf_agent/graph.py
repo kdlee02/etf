@@ -50,7 +50,9 @@ def route(question: str) -> Answer:
     return _compiled.invoke({"question": question})["answer"]
 
 
-if __name__ == "__main__":  # ponytail: 라우팅 자체 점검 (실 API 2콜)
+if __name__ == "__main__":  # ponytail: 라우팅 자체 점검 (실 API 3콜)
     assert _classify("비트코인 살까?") == "web"
     assert _classify("한국 ETF 섹터 비중 알려줘") == "scoped"
-    print("OK — classify 라우팅 확인 (web/scoped)")
+    # 자연어 앱 예시: 투자 의도 말투가 섞여도 주제(국가/섹터)면 scoped여야 한다
+    assert _classify("한국에 투자하는 ETF랑 주요 종목/섹터 알려줘") == "scoped"
+    print("OK — classify 라우팅 확인 (web/scoped, 자연어 scoped 포함)")
