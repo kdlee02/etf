@@ -1,0 +1,42 @@
+"""Tavily 웹검색. tools.py 규칙대로 절대 raise 하지 않는다.
+
+transitive `requests` 대신 stdlib urllib 사용 (신규/전이 의존성 회피).
+"""
+import json
+import os
+import urllib.error
+import urllib.request
+
+_ENDPOINT = "https://api.tavily.com/search"
+
+
+def _load_env() -> None:
+    from .agent import _load_env as _le  # 지연 임포트: 순환 회피
+    _le()
+
+
+def web_search(query: str) -> dict:
+    """오프토픽 질문을 웹에서 검색해 상위 결과를 반환한다.
+
+    Args:
+        query: 사용자 질문 그대로.
+    """
+    _load_env()
+    key = os.environ.get("TAVILEY_API_KEY")
+    if not key:
+        return {"found": False, "reason": "TAVILEY_API_KEY가 없습니다."}
+    body = json.dumps({"api_key": key, "query": query,
+                       "max_results": 5, "search_depth": "basic"}).encode()
+    req = urllib.request.Request(_ENDPOINT, data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+        return {"found": False, "reason": f"웹검색 실패: {type(e).__name__}"}
+    results = [{"title": r.get("title", ""), "url": r.get("url", ""),
+                "content": r.get("content", "")}
+               for r in data.get("results", [])]
+    if not results:
+        return {"found": False, "reason": "웹검색 결과 없음"}
+    return {"found": True, "query": query, "results": results}
