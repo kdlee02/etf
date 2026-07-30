@@ -31,13 +31,15 @@ CASES = [
         "forbid_text": ["XLK"],  # 섹터 ETF가 국가 순위에 끼면 category 필터 버그
     },
     {
-        # 도구 호출 자체는 금지하지 않는다. get_sector_etf('비트코인') -> found:false -> 거절은
-        # '기억이 아니라 데이터로 거절한 것'이라 오히려 옳다. 진짜 기준은 근거 없이 답하지 않는 것.
-        "id": "ac4_out_of_corpus",
+        # Phase 3: 오프토픽은 web으로 라우팅된다. 무관한 ETF 도구를 찌르지 않고,
+        # 사실만 + 고지로 답하며, 매수/매도 조언은 하지 않는다.
+        "id": "ac4_out_of_scope_web",
         "q": "비트코인 살까?",
-        "expect_no_evidence": True,  # 어떤 도구도 found:true를 주면 안 된다
-        "expect_text": ["제공된 데이터에 없습니다", "투자 권유가 아닙니다"],
-        "forbid_text": ["BITO", "IBIT", "GBTC"],  # 기억에서 끌어온 티커 = 환각
+        "expect_tools": ["web_search"],
+        "forbid_tools": ["get_sector_weights", "get_sector_etf", "get_country_etfs",
+                         "rank_countries_by_sector", "get_top_holdings"],
+        "expect_text": ["웹", "투자 권유가 아닙니다"],
+        "forbid_text": ["매수하세요", "사시는 것을 추천", "파세요"],
     },
     {
         "id": "ac5_reask",
@@ -78,6 +80,9 @@ def check(case, answer) -> list[str]:
             fails.append(f"도구 미호출: {tool} (호출됨: {called or '없음'})")
     if expect_tools == [] and called:
         fails.append(f"도구를 부르면 안 되는데 호출됨: {called}")
+    for tool in case.get("forbid_tools", []):
+        if tool in called:
+            fails.append(f"부르면 안 되는 도구 호출됨: {tool}")
     if case.get("expect_no_evidence") and answer.has_evidence:
         found = [c.name for c in answer.tool_calls if (c.result or {}).get("found")]
         fails.append(f"근거 없이 답해야 하는데 실데이터가 붙음: {found}")

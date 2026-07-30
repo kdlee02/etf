@@ -98,6 +98,10 @@ def chart_for(call, dark=False):
                        "3개월": f"{e['ret_3mo']:+.1f}%" if e.get("ret_3mo") is not None else "—",
                        "1년": f"{e['ret_1y']:+.1f}%" if e.get("ret_1y") is not None else "—"}]
 
+    if call.name == "web_search":
+        return None, [{"제목": r.get("title", ""), "출처": r.get("url", "")}
+                      for r in result.get("results", [])]
+
     return None, None
 
 
