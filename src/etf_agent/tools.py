@@ -1,7 +1,7 @@
-"""Gemini에 노출하는 데이터 조회 함수들.
+"""Upstage Solar에 노출하는 데이터 조회 함수들.
 
 규칙: 절대 raise 하지 않는다. 데이터가 없으면 {"found": False, ...}를 돌려준다 —
-예외가 나면 Gemini의 function-calling 루프가 깨진다.
+예외가 나면 function-calling 루프가 깨진다.
 """
 import sqlite3
 

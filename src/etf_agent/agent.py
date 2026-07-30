@@ -18,7 +18,8 @@ from .universe import COUNTRY_ETFS, SECTOR_KO_MAP
 
 MODEL = "solar-pro3"  # 병렬 tool call은 pro3 전용
 BASE_URL = "https://api.upstage.ai/v1"
-MAX_TOOL_ROUNDS = 5  # 폭주 방지. 실제로는 1~2회면 끝난다.
+MAX_TOOL_ROUNDS = 5  # 폭주 방지 상한. 1~2회면 끝난다는 건 아직 추정 — 실제 라운드 분포는 미측정.
+                     # TODO: ask() 루프 실측 로그를 남겨 이 상한의 여유가 적절한지 확인.
 
 # RFP 컴플라이언스 요건이라 모델의 기분에 맡기지 않는다. 프롬프트에도 넣지만 코드로 보장한다.
 DISCLAIMER = "투자 권유가 아닙니다."
@@ -106,7 +107,13 @@ def _ungrounded_tickers(text: str, trace: list["ToolCall"]) -> set[str]:
 
 
 def _reground(text: str, trace: list["ToolCall"], client, messages: list[dict]) -> str:
-    """도구에 없는 티커가 있으면 한 번만 자가수정 재생성. 없으면 원문 그대로 (재발해도 루프 안 돈다)."""
+    """도구에 없는 티커가 있으면 한 번만 자가수정 재생성. 없으면 원문 그대로.
+
+    1회로 멈추는 이유(의도된 트레이드오프): 근거 없는 티커가 남는다는 건 도구 결과에
+    해당 종목이 아예 없다는 뜻이라, 재시도해도 모델이 끌어올 근거가 없어 잘 안 잡힌다.
+    2회 이상은 지연·비용만 늘고 회수율은 미미 → 1회 시도 후 남으면 감수한다.
+    (재검증/재재생성은 일부러 안 한다: 무한 루프·비용 방지.)
+    """
     bad = _ungrounded_tickers(text, trace)
     if not bad:
         return text
