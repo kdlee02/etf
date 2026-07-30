@@ -400,6 +400,7 @@ name = "etf-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "faiss-cpu" },
     { name = "langchain-community" },
     { name = "langchain-core" },
@@ -420,6 +421,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2026.6.17" },
     { name = "faiss-cpu", specifier = ">=1.14.3" },
     { name = "langchain-community", specifier = ">=0.4.2" },
     { name = "langchain-core", specifier = ">=1.5.1" },
