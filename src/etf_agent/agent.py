@@ -158,23 +158,24 @@ def _schema(fn) -> dict:
     }}
 
 
-def ask(question: str, grounded: bool = True) -> Answer:
-    """질문에 답한다. grounded=False면 도구 없이 — 일반 LLM 비교용(환각 시연)."""
-    if grounded and (reask := _bare_topic(question)):
-        return Answer(text=_with_disclaimer(reask))  # 도구 없이 되묻는다 — 근거도 없다
+def _run_ungrounded(question: str) -> Answer:
+    """도구 없이 답한다 — 일반 LLM 비교용(환각 시연)."""
+    client = _client()
+    messages = [{"role": "system", "content": UNGROUNDED_INSTRUCTION},
+                {"role": "user", "content": question}]
+    response = client.chat.completions.create(model=MODEL, messages=messages, temperature=0)
+    return Answer(text=_with_disclaimer(response.choices[0].message.content or ""),
+                  grounded=False)
 
+
+def _run_scoped(question: str) -> Answer:
+    """스코프 내 질문을 function-calling tool 루프로 답한다. (bare_topic은 ask에서 걸러진다.)"""
     client = _client()
     registry = {fn.__name__: fn for fn in TOOLS}
     messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_INSTRUCTION if grounded else UNGROUNDED_INSTRUCTION},
+        {"role": "system", "content": SYSTEM_INSTRUCTION},
         {"role": "user", "content": question},
     ]
-
-    if not grounded:
-        response = client.chat.completions.create(model=MODEL, messages=messages, temperature=0)
-        return Answer(text=_with_disclaimer(response.choices[0].message.content or ""),
-                      grounded=False)
-
     trace: list[ToolCall] = []
     schemas = [_schema(fn) for fn in TOOLS]
     for _ in range(MAX_TOOL_ROUNDS):
@@ -194,7 +195,6 @@ def ask(question: str, grounded: bool = True) -> Answer:
             except json.JSONDecodeError:
                 args = {}
             fn = registry.get(call.function.name)
-            # 툴은 raise 하지 않지만, 모델이 없는 이름이나 이상한 인자를 줄 수 있다.
             if fn is None:
                 result = {"found": False, "reason": f"알 수 없는 도구: {call.function.name}"}
             else:
@@ -207,10 +207,18 @@ def ask(question: str, grounded: bool = True) -> Answer:
                              "name": call.function.name,
                              "content": json.dumps(result, ensure_ascii=False)})
 
-    # 라운드를 다 썼다 — 도구 결과는 있으니 마지막으로 도구 없이 정리시킨다.
     final = client.chat.completions.create(model=MODEL, messages=messages, temperature=0)
     text = _reground(final.choices[0].message.content or "답변을 생성하지 못했습니다.", trace, client, messages)
     return Answer(text=_with_disclaimer(text), tool_calls=trace)
+
+
+def ask(question: str, grounded: bool = True) -> Answer:
+    """질문에 답한다. grounded=False면 도구 없이 — 일반 LLM 비교용(환각 시연)."""
+    if not grounded:
+        return _run_ungrounded(question)
+    if reask := _bare_topic(question):
+        return Answer(text=_with_disclaimer(reask))  # 도구 없이 되묻는다 — 근거도 없다
+    return _run_scoped(question)
 
 
 if __name__ == "__main__":
