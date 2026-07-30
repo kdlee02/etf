@@ -56,3 +56,19 @@ def test_web_search_soft_fails_on_non_dict_body(monkeypatch):
                         lambda *a, **k: FakeResp(["not", "a", "dict"]))
     out = ws.web_search("아무거나")
     assert out["found"] is False
+
+
+def test_web_search_passes_certifi_ssl_context(monkeypatch):
+    import ssl
+    monkeypatch.setenv("TAVILEY_API_KEY", "x")
+    monkeypatch.setattr(ws, "_load_env", lambda: None)
+    captured = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["context"] = context
+        return FakeResp({"results": [{"title": "t", "url": "u", "content": "c"}]})
+
+    monkeypatch.setattr(ws.urllib.request, "urlopen", fake_urlopen)
+    out = ws.web_search("q")
+    assert isinstance(captured["context"], ssl.SSLContext)
+    assert out["found"] is True

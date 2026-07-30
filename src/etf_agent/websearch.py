@@ -4,9 +4,13 @@ transitive `requests` 대신 stdlib urllib 사용 (신규/전이 의존성 회�
 """
 import json
 import os
+import ssl
 import urllib.request
 
+import certifi
+
 _ENDPOINT = "https://api.tavily.com/search"
+_SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 
 
 def _load_env() -> None:
@@ -29,7 +33,7 @@ def web_search(query: str) -> dict:
     req = urllib.request.Request(_ENDPOINT, data=body,
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX) as resp:
             data = json.loads(resp.read())
     except (OSError, ValueError) as e:
         return {"found": False, "reason": f"웹검색 실패: {type(e).__name__}"}
