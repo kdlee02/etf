@@ -2,19 +2,22 @@
 
 국가·섹터·산업 기준으로 ETF를 **실제 데이터**로 조회하고, 개념·세금·위험·전략 질문은 **문서 코퍼스(RAG)**로 답하는 하이브리드 에이전트. 모든 수치는 도구 호출 결과이며, 근거 없는 답변은 하지 않는다. **모든 답변을 도구·코퍼스 근거에 묶어 환각을 원천 차단**하는 것 — 즉 **환각 방지(anti-hallucination)**가 이 프로젝트의 핵심 설계 원칙이다.
 
-> 코멘토 AI SA 부트캠프 프로젝트. Upstage `solar-pro3` + function-calling + langchain FAISS RAG.
+> 코멘토 AI SA 부트캠프 프로젝트. Upstage `solar-pro3` + function-calling + langchain FAISS RAG + langgraph 라우터 + Tavily 웹검색.
 
 ## 이런 걸 물어봅니다
 
-세 축(구조화 조회 · RAG 인용 · 오프토픽 거절)을 한 예시씩. *답변은 예시이며 실제 수치는 캐시 스냅샷에 따라 달라진다.*
+질문을 langgraph 라우터가 **scoped(도구·RAG) · web · reject** 세 갈래로 분류한다. 각 경로를 한 예시씩. *답변은 예시이며 실제 수치는 캐시 스냅샷에 따라 달라진다.*
 
-**Q. 반도체 섹터 비중이 높은 국가는?** *(구조화 조회 — `rank_countries_by_sector`)*
+**Q. 반도체 섹터 비중이 높은 국가는?** *(scoped — 구조화 조회 `rank_countries_by_sector`)*
 > 대만 68.4% · 한국 41.2% · 미국 29.7% … (도구 반환값. 표+막대 차트로 표시)
 
-**Q. 환헤지 ETF의 `(H)`가 무슨 뜻이야?** *(RAG 인용 — `search_concepts`)*
+**Q. 환헤지 ETF의 `(H)`가 무슨 뜻이야?** *(scoped — RAG 인용 `search_concepts`)*
 > `(H)`는 환헤지(hedged)를 뜻하며 환율 변동을 상쇄하는 대신 헤지 비용이 발생합니다. **(미래에셋 환헤지 ETF p4)**
 
-**Q. 비트코인 지금 살까?** *(오프토픽 거절 — `MIN_SCORE` 컷오프 + 고지)*
+**Q. 미국 기준금리 몇 %야?** *(web — 도메인 내 사실이지만 도구·코퍼스에 없음 → Tavily 웹검색)*
+> (웹 검색 결과 요약 + 출처 링크. 사실만 전달, 매수/매도 판단은 하지 않음)
+
+**Q. 비트코인 지금 살까?** *(reject — 범위 밖 자산 → 라우터가 거절)*
 > 암호화폐 매수/매도 판단은 이 어시스턴트의 범위가 아닙니다. 정보 제공 목적이며 투자 권유가 아닙니다.
 
 ## 핵심 특징
@@ -22,20 +25,27 @@
 - **근거 기반(환각 방지):** 답변의 모든 수치는 도구가 반환한 값만 사용. 도구를 호출하지 않으면 티커·수치를 언급하지 않는다.
 - **다방향 조회:** 국가→ETF·종목·섹터, 섹터→ETF·세부산업·대표종목(+국가 순위는 "비중 높은 나라"처럼 명시 요청 시), 산업→대표종목·세부산업·소속섹터.
 - **RAG 인용:** 환헤지·양도세·상장폐지·듀얼 모멘텀 등 개념/전략 질문은 코퍼스에서 검색해 `(문서명 p페이지)`로 인용.
+- **라우터 + 웹 폴백:** langgraph 라우터가 질문을 scoped/web/reject로 분기. 도구·코퍼스에 없는 도메인 내 사실은 Tavily 웹검색으로 답하고, scoped 경로가 근거를 못 얻으면 web으로 보정한다(CRAG).
 - **부정 규칙은 코드로 강제:** 모델이 프롬프트만으론 어기는 규칙(고지 누락, 오프토픽 거절, 티커 환각)을 코드로 잠금 — `_with_disclaimer`, `MIN_SCORE`, `_reground`.
 
 ## 아키텍처
 
 ```
-질문 → agent.ask() ─ function-calling loop (solar-pro3)
-                      ├─ 구조화 도구 (tools.py) ── SQLite 캐시 (db.py) ← yfinance
-                      └─ search_concepts (retrieval.py) ── langchain FAISS ← 문서 코퍼스
-                    → 가드(고지·그라운딩) → Streamlit UI (app.py: 답변 + 차트 + 근거 패널)
+질문 → route() ─ langgraph 라우터: _classify → scoped / web / reject
+  ├─ scoped: function-calling loop (solar-pro3)
+  │            ├─ 구조화 도구 (tools.py) ── SQLite 캐시 (db.py) ← yfinance
+  │            └─ search_concepts (retrieval.py) ── langchain FAISS ← 문서 코퍼스
+  │            └─ 근거 0건이면 web으로 폴백 (CRAG)
+  ├─ web: Tavily 웹검색 (websearch.py) — 도구·코퍼스 밖 도메인 사실
+  └─ reject: 범위 밖(개별종목·암호화폐·오프도메인) 거절
+  → 가드(고지·그라운딩) → Streamlit UI (app.py: 답변 + 차트 + 근거/출처 패널)
 ```
 
 | 모듈 | 역할 |
 |---|---|
-| `agent.py` | function-calling 루프, 환각 방지 가드(`_with_disclaimer`, `_reground`) |
+| `graph.py` | langgraph 라우터 — `_classify`로 scoped/web/reject 분기 + CRAG 폴백 |
+| `agent.py` | function-calling 루프, 환각 방지 가드(`_with_disclaimer`, `_reground`), 웹 답변 노드 |
+| `websearch.py` | Tavily 웹검색 래퍼 (도메인 내 사실질문·scoped 폴백, raise 안 함) |
 | `tools.py` | 조회 도구 8종 (`get_sector_weights`, `rank_countries_by_sector`, `get_sector_landscape`, `get_industry` 등) |
 | `retrieval.py` | `search_concepts` — FAISS 개념 검색 + 오프토픽 컷오프(`MIN_SCORE`) |
 | `db.py` / `universe.py` | SQLite 캐시 · 국가/섹터/산업 유니버스·한국어 매핑 |
@@ -69,7 +79,8 @@
 uv sync
 
 # 2. API 키 (.env)
-echo "UPSTAGE_API_KEY=발급받은_키" > .env   # https://console.upstage.ai
+echo "UPSTAGE_API_KEY=발급받은_키" > .env    # https://console.upstage.ai (필수)
+echo "TAVILY_API_KEY=발급받은_키" >> .env    # https://tavily.com (web 라우팅용, 없으면 web 경로만 비활성)
 
 # 3. 데이터 수집 (yfinance → SQLite, 멱등)
 uv run python -m etf_agent.ingest
@@ -102,7 +113,7 @@ uv run streamlit run app.py
 ## 테스트 & 평가
 
 ```bash
-uv run pytest                        # 31 tests
+uv run pytest                        # 51 tests
 uv run python eval/eval_retrieval.py # RAG 검색 평가 (recall@k / MRR / category)
 uv run python eval/sweep.py          # 청킹·k 파라미터 스윕
 ```
