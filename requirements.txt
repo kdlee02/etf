@@ -31,6 +31,7 @@ cachetools==7.1.4
 certifi==2026.6.17
     # via
     #   curl-cffi
+    #   etf-agent
     #   httpcore
     #   httpx
     #   requests
@@ -86,6 +87,7 @@ httptools==0.8.0
     # via streamlit
 httpx==0.28.1
     # via
+    #   langgraph-sdk
     #   langsmith
     #   openai
 httpx-sse==0.4.3
@@ -126,16 +128,32 @@ langchain-core==1.5.1
     #   langchain-openai
     #   langchain-text-splitters
     #   langchain-upstage
+    #   langgraph
+    #   langgraph-checkpoint
+    #   langgraph-prebuilt
+    #   langgraph-sdk
 langchain-openai==1.4.1
     # via langchain-upstage
 langchain-protocol==0.0.18
-    # via langchain-core
+    # via
+    #   langchain-core
+    #   langgraph-sdk
 langchain-text-splitters==1.1.2
     # via
     #   etf-agent
     #   langchain-classic
 langchain-upstage==0.7.7
     # via etf-agent
+langgraph==1.2.10
+    # via etf-agent
+langgraph-checkpoint==4.1.1
+    # via
+    #   langgraph
+    #   langgraph-prebuilt
+langgraph-prebuilt==1.1.0
+    # via langgraph
+langgraph-sdk==0.4.2
+    # via langgraph
 langsmith==0.10.10
     # via
     #   langchain-classic
@@ -177,8 +195,12 @@ openai==2.46.0
     # via
     #   etf-agent
     #   langchain-openai
-orjson==3.11.9 ; platform_python_implementation != 'PyPy'
-    # via langsmith
+orjson==3.11.9
+    # via
+    #   langgraph-sdk
+    #   langsmith
+ormsgpack==1.12.2
+    # via langgraph-checkpoint
 packaging==26.2
     # via
     #   altair
@@ -222,6 +244,7 @@ pydantic==2.13.4
     # via
     #   langchain-classic
     #   langchain-core
+    #   langgraph
     #   langsmith
     #   openai
     #   pydantic-settings
@@ -240,7 +263,9 @@ pypdfium2==5.12.1
 python-dateutil==2.9.0.post0
     # via pandas
 python-dotenv==1.2.2
-    # via pydantic-settings
+    # via
+    #   etf-agent
+    #   pydantic-settings
 python-multipart==0.0.32
     # via streamlit
 pytz==2026.2
@@ -346,13 +371,16 @@ uvicorn==0.51.0
     # via streamlit
 watchdog==6.0.0 ; sys_platform != 'darwin'
     # via streamlit
-websockets==16.1
+websockets==15.0.1
     # via
+    #   langgraph-sdk
     #   langsmith
     #   streamlit
     #   yfinance
 xxhash==3.8.1
-    # via langsmith
+    # via
+    #   langgraph
+    #   langsmith
 yarl==1.24.5
     # via aiohttp
 yfinance==1.5.1

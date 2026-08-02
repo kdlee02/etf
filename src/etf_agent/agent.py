@@ -4,6 +4,7 @@ OpenAI 호환 API라 도구 루프를 직접 돈다. tool_call_id로 호출-응�
 """
 import inspect
 import json
+import logging
 import os
 import re
 import typing
@@ -18,10 +19,12 @@ from .prompts import (ROUTER_INSTRUCTION, SYSTEM_INSTRUCTION,
 from .tools import TOOLS
 from .universe import COUNTRY_ETFS, SECTOR_KO_MAP
 
+log = logging.getLogger(__name__)
+
 MODEL = "solar-pro3"  # 병렬 tool call은 pro3 전용
 BASE_URL = "https://api.upstage.ai/v1"
-MAX_TOOL_ROUNDS = 5  # 폭주 방지 상한. 1~2회면 끝난다는 건 아직 추정 — 실제 라운드 분포는 미측정.
-                     # TODO: ask() 루프 실측 로그를 남겨 이 상한의 여유가 적절한지 확인.
+MAX_TOOL_ROUNDS = 5  # 폭주 방지 상한. 실제 tool-call 라운드 수는 _run_scoped가 INFO 로그로 남긴다
+                     # (상한 소진 시 WARNING). 분포를 보고 이 값의 여유가 적절한지 확인.
 
 # RFP 컴플라이언스 요건이라 모델의 기분에 맡기지 않는다. 프롬프트에도 넣지만 코드로 보장한다.
 DISCLAIMER = "투자 권유가 아닙니다."
@@ -46,14 +49,9 @@ class Answer:
 
 
 def _load_env() -> None:
-    """.env에서 API 키를 읽는다. python-dotenv 없이 (ponytail: 두 줄이면 된다)."""
-    env = Path(__file__).resolve().parents[2] / ".env"
-    if not env.exists():
-        return
-    for line in env.read_text().splitlines():
-        key, _, value = line.partition("=")
-        if key.strip() and not key.startswith("#"):
-            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+    """.env에서 API 키를 읽는다. 이미 설정된 환경변수는 덮어쓰지 않는다(override=False = 기존 setdefault 동작)."""
+    from dotenv import load_dotenv  # 지연 임포트: 임포트 비용 회피
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 
 
 _cached_client: OpenAI | None = None
@@ -239,9 +237,10 @@ def _run_scoped(question: str, on_token=None) -> Answer:
     ]
     trace: list[ToolCall] = []
     schemas = [_schema(fn) for fn in TOOLS]
-    for _ in range(MAX_TOOL_ROUNDS):
+    for turn in range(1, MAX_TOOL_ROUNDS + 1):
         content, tool_calls, assistant = _round(client, messages, tools=schemas, on_token=on_token)
         if not tool_calls:
+            log.info("tool-call rounds: %d/%d", turn - 1, MAX_TOOL_ROUNDS)  # 마지막 turn은 답변만
             text = _reground(content or "답변을 생성하지 못했습니다.", trace, client, messages)
             return Answer(text=_with_disclaimer(text), tool_calls=trace)
 
@@ -264,6 +263,7 @@ def _run_scoped(question: str, on_token=None) -> Answer:
                              "name": call.function.name,
                              "content": json.dumps(result, ensure_ascii=False)})
 
+    log.warning("MAX_TOOL_ROUNDS(%d) 소진 — 상한이 낮을 수 있음", MAX_TOOL_ROUNDS)
     content, _, _ = _round(client, messages, on_token=on_token)
     text = _reground(content or "답변을 생성하지 못했습니다.", trace, client, messages)
     return Answer(text=_with_disclaimer(text), tool_calls=trace)

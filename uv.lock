@@ -410,6 +410,7 @@ dependencies = [
     { name = "openai" },
     { name = "pdfplumber" },
     { name = "plotly" },
+    { name = "python-dotenv" },
     { name = "streamlit" },
     { name = "yfinance" },
 ]
@@ -431,6 +432,7 @@ requires-dist = [
     { name = "openai", specifier = ">=2.46.0" },
     { name = "pdfplumber", specifier = ">=0.11.10" },
     { name = "plotly", specifier = ">=5.24" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "streamlit", specifier = ">=1.40" },
     { name = "yfinance", specifier = ">=1.5,<2" },
 ]
