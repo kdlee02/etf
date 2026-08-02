@@ -25,9 +25,9 @@ def web_search(query: str) -> dict:
         query: 사용자 질문 그대로.
     """
     _load_env()
-    key = os.environ.get("TAVILEY_API_KEY")
+    key = os.environ.get("TAVILY_API_KEY") or os.environ.get("TAVILEY_API_KEY")  # 올바른 철자 우선, 기존 오타 폴백
     if not key:
-        return {"found": False, "reason": "TAVILEY_API_KEY가 없습니다."}
+        return {"found": False, "reason": "TAVILY_API_KEY가 없습니다."}
     body = json.dumps({"api_key": key, "query": query,
                        "max_results": 5, "search_depth": "basic"}).encode()
     req = urllib.request.Request(_ENDPOINT, data=body,

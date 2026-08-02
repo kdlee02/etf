@@ -9,6 +9,7 @@ import re
 import typing
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 from openai import OpenAI
 
@@ -159,18 +160,77 @@ def _schema(fn) -> dict:
     }}
 
 
-def _run_ungrounded(question: str) -> Answer:
+def _stream_text(client, messages, on_token) -> str:
+    """도구 없는 생성을 스트리밍하며 델타를 on_token으로 흘리고 전체 텍스트를 모아 반환."""
+    text = ""
+    for chunk in client.chat.completions.create(
+            model=MODEL, messages=messages, temperature=0, stream=True):
+        delta = chunk.choices[0].delta.content or ""
+        if delta:
+            text += delta
+            on_token(delta)
+    return text
+
+
+def _round(client, messages, tools=None, on_token=None):
+    """툴루프 한 라운드. 반환: (content, tool_calls, assistant_msg_dict).
+
+    on_token이 있으면 stream=True로 content 토큰을 흘리고, 스트림된 tool_call 델타를 재조립한다.
+    tool_calls는 .id / .function.name / .function.arguments 인터페이스를 갖는다(비스트림과 동일).
+    """
+    kw = {"model": MODEL, "messages": messages, "temperature": 0}
+    if tools:
+        kw.update(tools=tools, tool_choice="auto", parallel_tool_calls=True)
+    if on_token is None:
+        msg = client.chat.completions.create(**kw).choices[0].message
+        return msg.content or "", list(msg.tool_calls or []), msg.model_dump(exclude_none=True)
+
+    content = ""
+    slots: dict = {}  # index -> {id, name, args}. 델타가 조각조각 와서 index로 누적한다.
+    for chunk in client.chat.completions.create(stream=True, **kw):
+        delta = chunk.choices[0].delta
+        if delta.content:
+            content += delta.content
+            on_token(delta.content)  # ponytail: 이 툴들은 content와 tool_call을 같이 안 뱉어 최종 답변만 흐른다
+        for tc in (delta.tool_calls or []):
+            s = slots.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+            if tc.id:
+                s["id"] = tc.id
+            if tc.function and tc.function.name:
+                s["name"] += tc.function.name
+            if tc.function and tc.function.arguments:
+                s["args"] += tc.function.arguments
+    ordered = [slots[i] for i in sorted(slots)]
+    calls = [SimpleNamespace(id=s["id"],
+                             function=SimpleNamespace(name=s["name"], arguments=s["args"]))
+             for s in ordered]
+    assistant = {"role": "assistant", "content": content or None}
+    if ordered:
+        assistant["tool_calls"] = [{"id": s["id"], "type": "function",
+                                    "function": {"name": s["name"], "arguments": s["args"]}}
+                                   for s in ordered]
+    return content, calls, assistant
+
+
+def _run_ungrounded(question: str, on_token=None) -> Answer:
     """도구 없이 답한다 — 일반 LLM 비교용(환각 시연)."""
     client = _client()
     messages = [{"role": "system", "content": UNGROUNDED_INSTRUCTION},
                 {"role": "user", "content": question}]
-    response = client.chat.completions.create(model=MODEL, messages=messages, temperature=0)
-    return Answer(text=_with_disclaimer(response.choices[0].message.content or ""),
-                  grounded=False)
+    if on_token is None:
+        body = client.chat.completions.create(
+            model=MODEL, messages=messages, temperature=0).choices[0].message.content or ""
+    else:
+        body = _stream_text(client, messages, on_token)
+    return Answer(text=_with_disclaimer(body), grounded=False)
 
 
-def _run_scoped(question: str) -> Answer:
-    """스코프 내 질문을 function-calling tool 루프로 답한다. (bare_topic은 ask에서 걸러진다.)"""
+def _run_scoped(question: str, on_token=None) -> Answer:
+    """스코프 내 질문을 function-calling tool 루프로 답한다. (bare_topic은 ask에서 걸러진다.)
+
+    on_token이 있으면 최종 답변 생성을 스트리밍한다. 단, 스트림된 텍스트는 _reground 이전 미리보기다 —
+    근거 없는 티커가 있으면 _reground가 재작성하므로 최종 Answer.text가 권위를 갖는다(호출자가 최종 렌더).
+    """
     client = _client()
     registry = {fn.__name__: fn for fn in TOOLS}
     messages: list[dict] = [
@@ -180,17 +240,13 @@ def _run_scoped(question: str) -> Answer:
     trace: list[ToolCall] = []
     schemas = [_schema(fn) for fn in TOOLS]
     for _ in range(MAX_TOOL_ROUNDS):
-        response = client.chat.completions.create(
-            model=MODEL, messages=messages, tools=schemas,
-            tool_choice="auto", parallel_tool_calls=True, temperature=0,
-        )
-        message = response.choices[0].message
-        if not message.tool_calls:
-            text = _reground(message.content or "답변을 생성하지 못했습니다.", trace, client, messages)
+        content, tool_calls, assistant = _round(client, messages, tools=schemas, on_token=on_token)
+        if not tool_calls:
+            text = _reground(content or "답변을 생성하지 못했습니다.", trace, client, messages)
             return Answer(text=_with_disclaimer(text), tool_calls=trace)
 
-        messages.append(message.model_dump(exclude_none=True))
-        for call in message.tool_calls:
+        messages.append(assistant)
+        for call in tool_calls:
             try:
                 args = json.loads(call.function.arguments or "{}")
             except json.JSONDecodeError:
@@ -208,38 +264,53 @@ def _run_scoped(question: str) -> Answer:
                              "name": call.function.name,
                              "content": json.dumps(result, ensure_ascii=False)})
 
-    final = client.chat.completions.create(model=MODEL, messages=messages, temperature=0)
-    text = _reground(final.choices[0].message.content or "답변을 생성하지 못했습니다.", trace, client, messages)
+    content, _, _ = _round(client, messages, on_token=on_token)
+    text = _reground(content or "답변을 생성하지 못했습니다.", trace, client, messages)
     return Answer(text=_with_disclaimer(text), tool_calls=trace)
 
 
 def _classify(question: str) -> str:
-    """질문을 'scoped' 또는 'web'으로 분류. 애매하면 scoped(안전 쪽 = 기존 동작 유지)."""
+    """질문을 'scoped'/'web'/'reject'로 분류. 애매하면 scoped(안전 쪽 = 기존 동작 유지)."""
     client = _client()
     resp = client.chat.completions.create(
         model=MODEL, temperature=0,
         messages=[{"role": "system", "content": ROUTER_INSTRUCTION},
                   {"role": "user", "content": question}])
     label = (resp.choices[0].message.content or "").strip().lower()
+    if "reject" in label:
+        return "reject"
     return "web" if "web" in label else "scoped"
 
 
-def _run_web(question: str) -> Answer:
+def _run_reject(question: str) -> Answer:
+    """범위 밖 질문. 검색·도구 없이 거절만 한다 (근거 0회 → 근거 패널도 비어야 함)."""
+    text = ("이 어시스턴트는 ETF·국가·섹터 리서치 범위의 질문에만 답합니다. "
+            "해당 범위 밖이라 답변을 지어내지 않고 거절합니다.")
+    return Answer(text=_with_disclaimer(text), grounded=False)
+
+
+def _run_web(question: str, on_token=None) -> Answer:
     """오프토픽 질문을 웹검색 결과로 답한다. 사실만 + 고지, 매수/매도 조언 금지."""
     from .websearch import web_search  # 지연 임포트: 순환 회피
     hits = web_search(question)
     trace = [ToolCall("web_search", {"query": question}, hits)]
     if not hits.get("found"):
-        text = "제공된 데이터에 없어 웹에서 찾아봤지만 신뢰할 만한 결과를 얻지 못했습니다."
-        return Answer(text=_with_disclaimer(text), tool_calls=trace)
+        text = _with_disclaimer("제공된 데이터에 없어 웹에서 찾아봤지만 신뢰할 만한 결과를 얻지 못했습니다.")
+        if on_token:
+            on_token(text)
+        return Answer(text=text, tool_calls=trace)
     client = _client()
     ctx = json.dumps(hits["results"], ensure_ascii=False)
-    resp = client.chat.completions.create(
-        model=MODEL, temperature=0,
-        messages=[{"role": "system", "content": WEB_INSTRUCTION},
-                  {"role": "user", "content": f"질문: {question}\n\n웹 검색 결과:\n{ctx}"}])
-    body = resp.choices[0].message.content or "검색 결과를 정리하지 못했습니다."
-    text = f"🔎 웹에서 검색한 결과입니다.\n\n{body}"
+    messages = [{"role": "system", "content": WEB_INSTRUCTION},
+                {"role": "user", "content": f"질문: {question}\n\n웹 검색 결과:\n{ctx}"}]
+    prefix = "🔎 웹에서 검색한 결과입니다.\n\n"
+    if on_token is None:
+        body = client.chat.completions.create(
+            model=MODEL, temperature=0, messages=messages).choices[0].message.content
+    else:
+        on_token(prefix)
+        body = _stream_text(client, messages, on_token)
+    text = f"{prefix}{body or '검색 결과를 정리하지 못했습니다.'}"
     return Answer(text=_with_disclaimer(text), tool_calls=trace)
 
 
@@ -251,6 +322,32 @@ def ask(question: str, grounded: bool = True) -> Answer:
         return Answer(text=_with_disclaimer(reask))  # 도구 없이 되묻는다 — 근거도 없다
     from .graph import route  # 지연 임포트: agent <-> graph 순환 회피
     return route(question)
+
+
+def ask_stream(question: str, grounded: bool = True, on_token=None) -> Answer:
+    """스트리밍 답변. on_token(델타 문자열)로 토큰을 흘리고 최종 Answer를 반환한다.
+
+    반환 Answer.text가 권위 있음 — _reground 재작성이나 CRAG 웹 폴백이 스트림 미리보기를
+    대체할 수 있으므로, 호출자(UI)는 스트림이 끝나면 반드시 Answer.text로 최종 렌더해야 한다.
+    라우팅은 graph.py의 route와 동일한 순서(bare_topic → classify → reject/web/scoped + CRAG)."""
+    emit = on_token or (lambda _t: None)
+    if not grounded:
+        return _run_ungrounded(question, on_token=on_token)
+    if reask := _bare_topic(question):
+        ans = Answer(text=_with_disclaimer(reask))
+        emit(ans.text)
+        return ans
+    route = _classify(question)
+    if route == "reject":
+        ans = _run_reject(question)
+        emit(ans.text)
+        return ans
+    if route == "web":
+        return _run_web(question, on_token=on_token)
+    ans = _run_scoped(question, on_token=on_token)
+    if not ans.has_evidence:  # CRAG: 스코프가 근거 0건이면 web으로 보정(미리보기는 최종 렌더가 대체)
+        return _run_web(question, on_token=on_token)
+    return ans
 
 
 if __name__ == "__main__":

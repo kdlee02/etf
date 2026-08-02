@@ -4,6 +4,7 @@ RAG 검색 계층: UpstageEmbeddings로 질문 임베딩 -> langchain FAISS simi
 인덱스는 정규화+내적(MAX_INNER_PRODUCT)이라 점수 = 코사인 유사도 (높을수록 유사).
 검색 결과를 search_concepts 도구로 감싸 function-calling 에이전트에 노출한다.
 """
+import re
 from pathlib import Path
 
 INDEX_DIR = Path(__file__).resolve().parents[2] / "data" / "faiss_concept"
@@ -12,6 +13,10 @@ INDEX_DIR = Path(__file__).resolve().parents[2] / "data" / "faiss_concept"
 # 예외 누수: "미국 기준금리 몇 %"=0.374 (금리-섹터 상관 페이지와 어휘 겹침). 상한을 0.38로 올리면
 # 이걸 막지만 실제 골드 0.39가 0.01 마진에 걸려 더 취약 → 0.35 유지, 이 누수는 LLM 관련성 판단(2차 게이트)에 맡긴다.
 MIN_SCORE = 0.35
+# top1이 이 이상이면 명백한 정답 → grader(solar ~2.7s) 건너뛴다. 누수(기준금리 0.377 등)는
+# 이 아래라 계속 grade돼 차단 유지. 정답/누수가 겹치는 0.37~0.42 애매 구간만 grader에 맡긴다.
+# ponytail: 유사도 기반 값싼 게이트. 코퍼스 커져 강한-정답 오탐이 생기면 이 상한을 올린다.
+GRADE_BYPASS = 0.50
 
 _vs = None
 
@@ -41,6 +46,26 @@ def search_ranked(query: str, k: int | None = None):
     return vs.similarity_search_with_score(query, k=k)
 
 
+def _grade(query: str, chunks: list[dict]) -> list[dict]:
+    """벡터 유사도가 통과시킨 발췌 중 질문에 실제로 관련된 것만 남긴다 (2차 게이트, CRAG).
+
+    벡터 점수는 어휘 겹침에 속는다("미국 기준금리 몇 %"가 금리-섹터 페이지에 0.37로 걸림).
+    관련성은 의미 판단이라 한 번의 배치 LLM 콜로 전체를 채점한다. 채점 실패 시 원본 유지(안전 쪽).
+    """
+    from .agent import MODEL, _client  # 지연 임포트: agent -> tools -> retrieval 순환 회피
+    from .prompts import GRADER_INSTRUCTION
+    listing = "\n".join(f"[{i}] {c['text'][:500]}" for i, c in enumerate(chunks))
+    resp = _client().chat.completions.create(
+        model=MODEL, temperature=0,
+        messages=[{"role": "system", "content": GRADER_INSTRUCTION},
+                  {"role": "user", "content": f"질문: {query}\n\n발췌:\n{listing}"}])
+    body = (resp.choices[0].message.content or "").strip().lower()
+    if body.startswith("none"):
+        return []
+    keep = {int(n) for n in re.findall(r"\d+", body) if int(n) < len(chunks)}
+    return [c for i, c in enumerate(chunks) if i in keep] if keep else chunks
+
+
 def search_concepts(query: str, k: int = 3) -> dict:
     """ETF 개념·세금·위험·섹터특성·전략 질문을 문서 코퍼스에서 검색해 근거 발췌를 반환한다.
 
@@ -57,11 +82,17 @@ def search_concepts(query: str, k: int = 3) -> dict:
     hits = search_ranked(query, k)
     if not hits or float(hits[0][1]) < MIN_SCORE:
         return {"found": False, "reason": "관련 문서를 찾지 못했습니다. (제공된 코퍼스 범위 밖)"}
+    # text 600자 캡: 모델 컨텍스트를 줄여 생성 지연 단축(원문 ~800자 → prefill 감소). 정의는 앞부분에
+    # 몰려 있어 인용엔 충분. UI 근거 패널도 이 발췌를 보여준다. ponytail: 정답이 잘리면 상한을 올린다.
     chunks = [{"source": d.metadata["source"], "section": d.metadata["section"],
                "page": d.metadata["page"], "category": d.metadata["category"],
-               "text": d.page_content, "score": round(float(score), 3)}
+               "text": d.page_content[:600], "score": round(float(score), 3)}
               for d, score in hits[:k]]
-    return {"found": True, "query": query, "chunks": chunks}
+    # top1이 충분히 강하면 grader 생략(지연 절감). 애매 구간만 LLM 2차 게이트로.
+    graded = chunks if float(hits[0][1]) >= GRADE_BYPASS else _grade(query, chunks)
+    if not graded:
+        return {"found": False, "reason": "관련 문서를 찾지 못했습니다. (제공된 코퍼스 범위 밖)"}
+    return {"found": True, "query": query, "chunks": graded}
 
 
 if __name__ == "__main__":  # ponytail: 검색 계층 자체 점검 (assert, 프레임워크 없음)
@@ -72,4 +103,7 @@ if __name__ == "__main__":  # ponytail: 검색 계층 자체 점검 (assert, 프
     assert top["score"] >= MIN_SCORE, f"top 유사도가 너무 낮다: {top['score']}"
     off = search_concepts("비트코인 살까?")
     assert not off["found"], f"오프토픽이 통과됐다: {off}"
-    print(f"OK — top: {top['source']} p{top['page']} (score {top['score']}) · 오프토픽 차단 확인")
+    # 벡터가 0.37로 통과시키던 누수(retrieval.py 주석) — 2차 게이트(_grade)가 막아야 한다
+    leak = search_concepts("미국 기준금리는 지금 몇 %야?")
+    assert not leak["found"], f"grader가 금리 누수를 못 막음: {leak}"
+    print(f"OK — top: {top['source']} p{top['page']} (score {top['score']}) · 오프토픽·금리누수 차단 확인")

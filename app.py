@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))  # 배포 시 e
 
 import streamlit as st
 
-from etf_agent.agent import ask
+from etf_agent.agent import ask_stream
 from etf_agent.charts import as_of, chart_for
 
 STALE_DAYS = 7  # 이보다 오래된 스냅샷이면 UI에 갱신 경고
@@ -93,17 +93,26 @@ if not st.session_state.history:
 question = st.chat_input("예: 대만 ETF의 섹터 비중은?") or st.session_state.pop("pending", None)
 
 if question:
-    with st.status("답변 생성 중…", expanded=False) as status:
+    # 스트리밍: 토큰을 즉시 흘려 20초 침묵을 없앤다. 확정 렌더(근거 패널 포함)는 rerun 후 render()가 한다.
+    with st.chat_message("user"):
+        st.write(question)
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        placeholder.markdown("_생각하는 중… (도구 호출·문서 검색)_")  # 첫 토큰 전 침묵 채우기
+        buf: list[str] = []
+
+        def on_token(t):
+            buf.append(t)
+            placeholder.markdown("".join(buf))
+
         try:
-            status.update(label="도구 호출 중…")
-            answer = ask(question, grounded=grounded)
-            status.update(label="답변 생성 중…")
+            answer = ask_stream(question, grounded=grounded, on_token=on_token)
+            placeholder.markdown(answer.text)  # _reground/CRAG 반영된 권위 텍스트로 확정
             entry = {"question": question, "answer": answer}
         except Exception as e:  # 카메라 앞에서 트레이스백 금지
             from etf_agent.agent import Answer
 
             entry = {"question": question, "error": True,
                      "answer": Answer(text=f"답변 중 문제가 생겼습니다. 다시 시도해 주세요.\n\n`{type(e).__name__}: {e}`")}
-        status.update(label="완료", state="complete")
     st.session_state.history.append(entry)
     st.rerun()
