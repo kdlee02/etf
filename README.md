@@ -25,7 +25,7 @@
 - **근거 기반(환각 방지):** 답변의 모든 수치는 도구가 반환한 값만 사용. 도구를 호출하지 않으면 티커·수치를 언급하지 않는다.
 - **다방향 조회:** 국가→ETF·종목·섹터, 섹터→ETF·세부산업·대표종목(+국가 순위는 "비중 높은 나라"처럼 명시 요청 시), 산업→대표종목·세부산업·소속섹터.
 - **RAG 인용:** 환헤지·양도세·상장폐지·듀얼 모멘텀 등 개념/전략 질문은 코퍼스에서 검색해 `(문서명 p페이지)`로 인용.
-- **라우터 + 웹 폴백:** langgraph 라우터가 질문을 scoped/web/reject로 분기. 도구·코퍼스에 없는 도메인 내 사실은 Tavily 웹검색으로 답하고, scoped 경로가 근거를 못 얻으면 web으로 보정한다(CRAG).
+- **라우터 + 웹 폴백:** langgraph 라우터가 질문을 scoped/web/reject로 분기. 도구·코퍼스에 없는 도메인 내 사실은 Tavily 웹검색으로 답하고, scoped 경로가 근거를 못 얻으면 web으로 보정한다(CRAG). "근거 0건"의 판정 주체와 폴백마저 실패했을 때의 최종 응답은 [근거 판정 3층](#근거-판정-3층--근거-0건은-누가-정하나) 참고.
 - **부정 규칙은 코드로 강제:** 모델이 프롬프트만으론 어기는 규칙(고지 누락, 오프토픽 거절, 티커 환각)을 코드로 잠금 — `_with_disclaimer`, `MIN_SCORE`, `_reground`.
 
 ## 아키텍처
@@ -53,6 +53,44 @@
 | `ingest.py` / `ingest_sectors.py` | yfinance → SQLite 수집 (멱등) |
 | `embed_corpus.py` | PDF → 청킹 → Upstage 임베딩 → FAISS 인덱스 |
 | `prompts.py` | 시스템 인스트럭션(역할·근거·모름·투자권유 아님) |
+
+### 근거 판정 3층 — "근거 0건"은 누가 정하나
+
+CRAG 폴백의 트리거인 "근거 0건"은 단일 조건이 아니라 3층으로 나뉘고, **각 층이 서로 다른 걸 판정한다**.
+
+| 층 | 위치 | 판정 대상 | 실패 시 |
+|---|---|---|---|
+| 1차 (값싼 게이트) | `MIN_SCORE = 0.35` [`retrieval.py`](src/etf_agent/retrieval.py#L83) | 벡터 top1 유사도 | `found: False` |
+| 2차 (의미 게이트) | `_grade()` [`retrieval.py`](src/etf_agent/retrieval.py#L49) | LLM이 발췌별 실제 관련성 채점 | `found: False` |
+| 최종 (라우팅) | `_crag_fallback()` [`graph.py`](src/etf_agent/graph.py#L34) | **툴 트레이스 전체**에 `found: True`가 하나라도 있나 | → `web` 노드 |
+
+최종 판정은 `Answer.has_evidence` [`agent.py`](src/etf_agent/agent.py#L47) 한 줄이다:
+
+```python
+return any(c.result and c.result.get("found") for c in self.tool_calls)
+```
+
+즉 **`search_concepts` 전용이 아니다.** RAG가 빈손이어도 `rank_countries_by_sector` 같은 구조화 도구가 성공했으면 폴백하지 않는다. 1·2차는 상류 필터고, web으로 넘길지 말지의 결정권은 `_crag_fallback`에 있다.
+
+**알려진 구멍:** `GRADE_BYPASS = 0.50` [`retrieval.py`](src/etf_agent/retrieval.py#L19) 위 구간은 지연 절감을 위해 2차 게이트를 건너뛴다. 따라서 **유사도가 강한 오탐은 어느 층도 거르지 못한다.** 현재 코퍼스(8종·69청크)에선 실측 정답 최고가 0.42라 발생하지 않지만, 코퍼스가 커져 강한 오탐이 생기면 이 상한을 올려야 한다.
+
+### 폴백의 마지막 단계 — web도 실패하면
+
+`web_search`는 절대 raise하지 않고 전부 `found: False`로 수렴한다([`websearch.py`](src/etf_agent/websearch.py)): `TAVILY_API_KEY` 없음 · 네트워크 예외 · 응답 형식 오류 · 결과 0건. 이때 [`_run_web`](src/etf_agent/agent.py#L297)이 모델을 부르지 않고 조기 반환하며, 사용자가 보는 최종 문구는 이것이다:
+
+> 제공된 데이터에 없어 웹에서 찾아봤지만 신뢰할 만한 결과를 얻지 못했습니다.
+>
+> 투자 권유가 아닙니다.
+
+**여기가 종착점이다** — 재시도하지 않는다. 근거를 못 얻은 상태에서 재시도는 지연만 늘고 모델이 끌어올 새 근거가 없다(`_reground`가 1회로 멈추는 것과 같은 판단). 근거 패널에는 `❌ web_search`가 남아 실패가 눈에 보인다.
+
+### 스트리밍 중 경로 전환
+
+scoped를 스트리밍하다 CRAG 폴백이 걸리면 이미 흘린 미리보기는 버려진다. 이때 [`ask_stream`](src/etf_agent/agent.py#L327)이 `STREAM_RESET` sentinel을 먼저 흘리고, UI는 버퍼를 비운 뒤 전환을 안내한다([`app.py`](app.py#L104)):
+
+> _내부 자료에 근거가 없어 웹 검색으로 보완합니다…_
+
+신호가 없으면 web 답변이 버려질 미리보기 뒤에 이어붙어 화면에 답변이 두 개로 보인다. `_reground` 재작성은 티커 몇 개만 바뀌므로 신호를 보내지 않고, 스트림 종료 후 `Answer.text`로 확정 렌더할 때 교체된다.
 
 ## 프롬프트 엔지니어링
 
@@ -113,10 +151,15 @@ uv run streamlit run app.py
 ## 테스트 & 평가
 
 ```bash
-uv run pytest                        # 51 tests
+uv run pytest                        # 52 tests
 uv run python eval/eval_retrieval.py # RAG 검색 평가 (recall@k / MRR / category)
+uv run python eval/eval_router.py    # 라우터 분류 평가 (false-reject / 혼동행렬)
 uv run python eval/sweep.py          # 청킹·k 파라미터 스윕
+uv run python eval/run_eval.py       # 라이브 스모크 (네트워크·API 키 필요)
 ```
+
+검색 품질과 **라우팅 품질**을 같은 수준으로 검증한다. 라우터는 판정 지점이 하나 더 늘어난
+곳이라 별도 골드셋을 둔다 — 검색이 아무리 정확해도 질문이 엉뚱한 경로로 가면 소용없다.
 
 ### 검색 평가 지표 ([`eval/eval_retrieval.py`](eval/eval_retrieval.py))
 
@@ -127,6 +170,41 @@ uv run python eval/sweep.py          # 청킹·k 파라미터 스윕
 - **top-1 category** — 1등 결과의 카테고리(`tax`/`concept`/`risk`/`sector`/`strategy`)가 기대와 일치하는가 (라우팅 정확도).
 
 현재: **recall@3 22/22 (100%) · MRR 1.000 · category 22/22 (100%)**.
+
+### 라우터 분류 평가 ([`eval/eval_router.py`](eval/eval_router.py))
+
+앱과 **동일한 `_classify`**를 그대로 호출한다(eval=프로덕션). 골드셋 25문항(scoped 13 · web 5 ·
+reject 7)에 경계 케이스를 일부러 섞었다 — 투자 의도 말투인데 주제가 국가/섹터라 scoped인 질문,
+도메인 안이지만 코퍼스 밖이라 web인 질문.
+
+- **false-reject** — 답할 수 있는 질문(scoped/web)을 reject로 보낸 비율. **1급 지표**다.
+- **false-accept** — 범위 밖 질문을 통과시킨 비율.
+- **혼동행렬** — 3×3. scoped↔web 오분류는 CRAG가 사후 보정하므로 false-reject보다 덜 아프다.
+
+셋을 같은 무게로 보지 않는 이유: scoped로 잘못 가도 근거 0건이면 web으로 넘어가지만,
+reject는 되돌릴 길이 없다. 사용자는 기능이 없다고 판단하고 떠난다.
+
+현재 (3회 반복 · 75판정): **정확도 75/75 (100%) · false-reject 0% · false-accept 0% · 편차 0**
+
+|기대\실제| reject | scoped | web |
+|---|---|---|---|
+| **scoped** | 0 | 39 | 0 |
+| **web** | 0 | 0 | 15 |
+| **reject** | 21 | 0 | 0 |
+
+### 도구 루프 상한 실측 ([`eval/run_eval.py`](eval/run_eval.py))
+
+`MAX_TOOL_ROUNDS = 5`가 적절한 여유인지 라이브 스모크의 INFO 로그로 확인한다.
+
+```bash
+uv run python eval/run_eval.py --runs 3 2>&1 | grep "tool-call rounds"
+```
+
+실측 (7세션 · scoped 케이스 21관측): **1라운드 7 · 2라운드 1 · 3라운드 11 · 소진 2 (9.5%)**
+
+소진해도 마지막 강제 답변 라운드가 받아내 **21/21 정답**이었다. 그래서 5를 유지한다 —
+소진 시 오답이 관측되면 그때 올린다. 상한은 폭주 방지용이지 성능 파라미터가 아니라,
+근거 없이 올리면 최악의 경우 지연·비용만 늘어난다.
 
 ### 파라미터 스윕 ([`eval/sweep.py`](eval/sweep.py))
 
@@ -146,6 +224,11 @@ uv run python eval/sweep.py          # 청킹·k 파라미터 스윕
 - **캐시 스냅샷:** 질의 시 네트워크를 치지 않는다. `ingest*`를 일 1회 재실행해 갱신(멱등). 기준일이 7일 초과하면 UI가 경고.
 - **저장소 제외:** PDF 코퍼스·SQLite 캐시·FAISS 인덱스는 `.gitignore` 처리(용량·저작권). 위 3·4단계로 재생성한다.
 - **RAG 코퍼스:** 공개 자료에서 관련 페이지만 선별([출처 표](#rag-코퍼스-출처) 참고).
+
+## 변경 이력
+
+회차별 피드백과 그 대응은 [`CHANGELOG.md`](CHANGELOG.md)에 지적 한 줄 · 대응 한 줄 · 커밋 해시로
+기록한다. 미대응 항목도 **미대응**으로 남긴다 — 안 한 것도 이력이다.
 
 ## 다루지 않는 것
 
