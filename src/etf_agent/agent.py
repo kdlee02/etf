@@ -29,6 +29,10 @@ MAX_TOOL_ROUNDS = 5  # 폭주 방지 상한. 실제 tool-call 라운드 수는 _
 # RFP 컴플라이언스 요건이라 모델의 기분에 맡기지 않는다. 프롬프트에도 넣지만 코드로 보장한다.
 DISCLAIMER = "투자 권유가 아닙니다."
 
+# 지금까지 흘린 스트림을 버리라는 신호. CRAG 폴백처럼 출처가 통째로 바뀔 때만 보낸다.
+# 문자열이 아닌 sentinel이라 답변 본문과 절대 충돌하지 않는다 (`is`로 판별).
+STREAM_RESET = object()
+
 
 @dataclass
 class ToolCall:
@@ -329,6 +333,8 @@ def ask_stream(question: str, grounded: bool = True, on_token=None) -> Answer:
 
     반환 Answer.text가 권위 있음 — _reground 재작성이나 CRAG 웹 폴백이 스트림 미리보기를
     대체할 수 있으므로, 호출자(UI)는 스트림이 끝나면 반드시 Answer.text로 최종 렌더해야 한다.
+    CRAG 폴백처럼 출처가 통째로 바뀌면 그 직전에 STREAM_RESET을 흘린다 — 받은 쪽은
+    지금까지의 버퍼를 버려야 한다(안 버리면 두 답변이 화면에 이어붙는다).
     라우팅은 graph.py의 route와 동일한 순서(bare_topic → classify → reject/web/scoped + CRAG)."""
     emit = on_token or (lambda _t: None)
     if not grounded:
@@ -345,7 +351,8 @@ def ask_stream(question: str, grounded: bool = True, on_token=None) -> Answer:
     if route == "web":
         return _run_web(question, on_token=on_token)
     ans = _run_scoped(question, on_token=on_token)
-    if not ans.has_evidence:  # CRAG: 스코프가 근거 0건이면 web으로 보정(미리보기는 최종 렌더가 대체)
+    if not ans.has_evidence:  # CRAG: 스코프가 근거 0건이면 web으로 보정
+        emit(STREAM_RESET)  # 흘린 미리보기는 폐기 — 안 지우면 web 답변이 그 뒤에 이어붙는다
         return _run_web(question, on_token=on_token)
     return ans
 

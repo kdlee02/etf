@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))  # 배포 시 e
 
 import streamlit as st
 
-from etf_agent.agent import ask_stream
+from etf_agent.agent import STREAM_RESET, ask_stream
 from etf_agent.charts import as_of, chart_for
 
 STALE_DAYS = 7  # 이보다 오래된 스냅샷이면 UI에 갱신 경고
@@ -102,6 +102,10 @@ if question:
         buf: list[str] = []
 
         def on_token(t):
+            if t is STREAM_RESET:  # CRAG 폴백 — 흘린 scoped 미리보기를 지우고 전환을 알린다
+                buf.clear()
+                placeholder.markdown("_내부 자료에 근거가 없어 웹 검색으로 보완합니다…_")
+                return
             buf.append(t)
             placeholder.markdown("".join(buf))
 

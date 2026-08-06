@@ -142,3 +142,19 @@ def test_ask_stream_crag_falls_back_to_web(monkeypatch):
     monkeypatch.setattr(agent, "_run_scoped", lambda q, on_token=None: empty)
     monkeypatch.setattr(agent, "_run_web", lambda q, on_token=None: web)
     assert agent.ask_stream("한국 ETF", on_token=lambda t: None) is web
+
+
+def test_ask_stream_crag_emits_reset_before_web_tokens(monkeypatch):
+    """폴백 직전에 폐기 신호를 보낸다 — UI가 버려질 scoped 미리보기를 지울 수 있어야 한다.
+
+    신호가 없으면 web 답변이 미리보기 뒤에 이어붙어 화면에 답변 두 개가 보인다.
+    """
+    monkeypatch.setattr(agent, "_classify", lambda q: "scoped")
+    empty = agent.Answer(text="근거없음", tool_calls=[agent.ToolCall("x", {}, {"found": False})])
+    monkeypatch.setattr(agent, "_run_scoped",
+                        lambda q, on_token=None: (on_token("버려질 미리보기"), empty)[1])
+    monkeypatch.setattr(agent, "_run_web",
+                        lambda q, on_token=None: (on_token("web답"), agent.Answer(text="web답"))[1])
+    tokens = []
+    agent.ask_stream("한국 ETF", on_token=tokens.append)
+    assert tokens == ["버려질 미리보기", agent.STREAM_RESET, "web답"]
