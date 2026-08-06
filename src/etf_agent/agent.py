@@ -23,8 +23,10 @@ log = logging.getLogger(__name__)
 
 MODEL = "solar-pro3"  # 병렬 tool call은 pro3 전용
 BASE_URL = "https://api.upstage.ai/v1"
-MAX_TOOL_ROUNDS = 5  # 폭주 방지 상한. 실제 tool-call 라운드 수는 _run_scoped가 INFO 로그로 남긴다
-                     # (상한 소진 시 WARNING). 분포를 보고 이 값의 여유가 적절한지 확인.
+MAX_TOOL_ROUNDS = 5  # 폭주 방지 상한. _run_scoped가 라운드 수를 INFO로, 소진을 WARNING으로 남긴다.
+                     # 실측(run_eval 7세션·21관측): 1라운드 7 · 2라운드 1 · 3라운드 11 · 소진 2 (9.5%).
+                     # 소진해도 마지막 강제 답변 라운드가 받아내 21/21 정답이라 5를 유지한다.
+                     # ponytail: 소진 시 오답이 관측되면 그때 올린다 — 지금은 올릴 근거가 없다.
 
 # RFP 컴플라이언스 요건이라 모델의 기분에 맡기지 않는다. 프롬프트에도 넣지만 코드로 보장한다.
 DISCLAIMER = "투자 권유가 아닙니다."

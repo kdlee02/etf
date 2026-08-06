@@ -63,7 +63,7 @@ def test_get_top_holdings_orders_by_weight_desc():
 
 
 def test_unknown_ticker_returns_not_found_instead_of_raising():
-    """툴은 raise 하지 않는다 — 예외는 Gemini 루프를 깬다."""
+    """툴은 raise 하지 않는다 — 예외는 function-calling 루프를 깬다."""
     for result in (tools.get_top_holdings("NOPE"), tools.get_sector_weights("NOPE"),
                    tools.get_etf_profile("NOPE"), tools.get_country_etfs("아틀란티스")):
         assert result["found"] is False

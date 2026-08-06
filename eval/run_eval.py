@@ -1,14 +1,21 @@
-"""라이브 Gemini 스모크. `uv run python eval/run_eval.py [--runs N]`
+"""라이브 solar-pro3 스모크. `uv run python eval/run_eval.py [--runs N]`
 
 CI 아님 — 네트워크와 API 쿼터가 필요하다. 판정은 **라우팅** 기준이다:
 답변 문구는 실행마다 흔들리므로 '어떤 도구를 불렀나'로 본다 (숫자를 안 지어냈다는 건 증명 불가).
 
-무료 티어는 분당 5요청이라 각 호출 사이에 쉬어간다.
+레이트 리밋이 있는 환경에선 --sleep으로 호출 간 대기를 준다.
+MAX_TOOL_ROUNDS 실측: 이 스크립트를 돌리면 _run_scoped가 라운드 수를 INFO 로그로 남긴다.
+`uv run python eval/run_eval.py --runs 3 2>&1 | grep 'tool-call rounds'`로 분포를 본다.
 """
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
+
+# 라이브러리는 로깅을 설정하지 않는다(핸들러는 앱/스크립트 몫). 여기서 켜야
+# _run_scoped의 "tool-call rounds" INFO가 실제로 보인다 — MAX_TOOL_ROUNDS 실측의 근거.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -31,10 +38,19 @@ CASES = [
         "forbid_text": ["XLK"],  # 섹터 ETF가 국가 순위에 끼면 category 필터 버그
     },
     {
-        # Phase 3: 오프토픽은 web으로 라우팅된다. 무관한 ETF 도구를 찌르지 않고,
-        # 사실만 + 고지로 답하며, 매수/매도 조언은 하지 않는다.
-        "id": "ac4_out_of_scope_web",
+        # Phase 3: 범위 밖 자산은 reject다 — 검색조차 하지 않고 거절한다.
+        # (라우터에 reject가 생기기 전엔 web으로 갔다. 그때 기준으로 남아 있던 케이스를 고쳤다.)
+        "id": "ac4_offdomain_reject",
         "q": "비트코인 살까?",
+        "expect_tools": [],  # 도구 0회 — 근거 패널이 '근거 없음'을 보여줄 수 있어야 한다
+        "expect_text": ["범위", "투자 권유가 아닙니다"],
+        "forbid_text": ["매수하세요", "사시는 것을 추천", "파세요"],
+    },
+    {
+        # 도메인 안이지만 도구·코퍼스에 없는 사실 -> web. 무관한 ETF 도구를 찌르지 않고,
+        # 사실만 + 고지로 답하며, 매수/매도 조언은 하지 않는다.
+        "id": "ac4b_domain_fact_web",
+        "q": "미국 기준금리 몇 %야?",
         "expect_tools": ["web_search"],
         "forbid_tools": ["get_sector_weights", "get_sector_etf", "get_country_etfs",
                          "rank_countries_by_sector", "get_top_holdings"],
