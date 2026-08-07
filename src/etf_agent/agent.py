@@ -17,7 +17,8 @@ from openai import OpenAI
 from .prompts import (ROUTER_INSTRUCTION, SYSTEM_INSTRUCTION,
                        UNGROUNDED_INSTRUCTION, WEB_INSTRUCTION)
 from .tools import TOOLS
-from .universe import COUNTRY_ETFS, SECTOR_KO_MAP
+from .universe import (COUNTRY_ETFS, SECTOR_KO_MAP, narrowed_names_in,
+                       resolve_sector, sector_approximation)
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +94,25 @@ def _bare_topic(question: str) -> str | None:
 def _with_disclaimer(text: str) -> str:
     """고지가 없으면 붙인다. 프롬프트로 지시해도 모델이 빠뜨릴 때가 있다 (측정됨)."""
     return text if DISCLAIMER in text else f"{text.rstrip()}\n\n{DISCLAIMER}"
+
+
+def _with_approximation(text: str, trace: list["ToolCall"], question: str = "") -> str:
+    """도구가 근사를 알렸으면 답변에 반드시 남긴다. _with_disclaimer와 같은 이유로 코드가 보장한다.
+
+    빠지면 사용자가 정보기술 섹터 수치를 반도체 수치로 읽는다 — 근거를 틀리게 제시하는 것이라
+    이 프로젝트에선 고지 누락보다 나쁘다. 프롬프트에도 지시하지만(prompts.py) 거기 맡기지 않는다.
+
+    도구 인자만 보면 우회된다: 실측에서 solar가 "은행"을 "금융"으로 정규화해 호출했고,
+    도구는 정식 섹터를 받았으니 근사인 줄 몰랐다. 그래서 질문 원문도 같이 본다 —
+    질문에 있던 세부 산업명이 그 상위 섹터로 조회됐으면 좁힘이 일어난 것이다.
+    """
+    notes = [n for c in trace if (n := (c.result or {}).get("approximation_note"))]
+    queried = {s for c in trace if (s := c.args.get("sector"))}
+    parents = {p for q in queried if (p := resolve_sector(q))}
+    notes += [note for name in narrowed_names_in(question)
+              if SECTOR_KO_MAP.get(name) in parents and (note := sector_approximation(name))]
+    missing = [n for n in dict.fromkeys(notes) if n not in text]  # 순서 유지 + 중복 제거
+    return text if not missing else f"{text.rstrip()}\n\n" + "\n".join(f"※ {n}" for n in missing)
 
 
 # 답변에서 티커로 오인되는 비-티커 대문자 토큰. 오탐 방지 스톱리스트.
@@ -248,7 +268,7 @@ def _run_scoped(question: str, on_token=None) -> Answer:
         if not tool_calls:
             log.info("tool-call rounds: %d/%d", turn - 1, MAX_TOOL_ROUNDS)  # 마지막 turn은 답변만
             text = _reground(content or "답변을 생성하지 못했습니다.", trace, client, messages)
-            return Answer(text=_with_disclaimer(text), tool_calls=trace)
+            return Answer(text=_with_disclaimer(_with_approximation(text, trace, question)), tool_calls=trace)
 
         messages.append(assistant)
         for call in tool_calls:
@@ -272,7 +292,7 @@ def _run_scoped(question: str, on_token=None) -> Answer:
     log.warning("MAX_TOOL_ROUNDS(%d) 소진 — 상한이 낮을 수 있음", MAX_TOOL_ROUNDS)
     content, _, _ = _round(client, messages, on_token=on_token)
     text = _reground(content or "답변을 생성하지 못했습니다.", trace, client, messages)
-    return Answer(text=_with_disclaimer(text), tool_calls=trace)
+    return Answer(text=_with_disclaimer(_with_approximation(text, trace, question)), tool_calls=trace)
 
 
 def _classify(question: str) -> str:

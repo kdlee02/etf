@@ -7,7 +7,8 @@ import sqlite3
 
 from .db import connect
 from .retrieval import search_concepts
-from .universe import SECTOR_KO_NAMES, resolve_industry, resolve_sector, sector_etf_for
+from .universe import (SECTOR_KO_NAMES, narrowing_note, resolve_industry,
+                       resolve_sector, sector_approximation, sector_etf_for)
 
 MAX_HOLDINGS = 10  # Yahoo가 상위 10개까지만 준다 (2026-07-17 확인)
 
@@ -27,16 +28,47 @@ def _rows(sql: str, params: tuple = ()) -> list[dict]:
     return [dict(r) for r in _db().execute(sql, params).fetchall()]
 
 
+# 모르는 이름에 지원 섹터를 나열하면 모델이 그중 하나를 임의로 골라 재호출한다.
+# 실측: get_sector_etf('게임') 실패 -> 목록 첫 항목 '정보기술'로 재시도 -> 무관한 차트.
+_UNKNOWN_SECTOR = ("'{name}'은(는) 제공된 데이터에 없습니다. 섹터도 산업도 아닙니다. "
+                   "임의로 다른 섹터를 대신 조회하지 말고, 데이터에 없다고 답하세요.")
+
+
+def _sector_or_parent(name: str) -> tuple[str | None, str | None]:
+    """섹터명이면 그대로, 산업명이면 그 산업이 속한 섹터로 올린다. -> (섹터키, 고지문구|None)
+
+    '게임'은 GICS에서 통신서비스인데 모델은 기술로 넘겨짚는다. 부모 섹터는 추측이 아니라
+    sector_industries 테이블에서 찾는다 — 모델의 사전 지식이 아니라 데이터가 정한다.
+    """
+    if key := resolve_sector(name):
+        return key, sector_approximation(name)
+    keys = resolve_industry(name)
+    if not keys:
+        return None, None
+    placeholders = ",".join("?" * len(keys))
+    rows = _rows(f"SELECT DISTINCT sector_key FROM sector_industries "
+                 f"WHERE industry_key IN ({placeholders})", tuple(keys))
+    if not rows:
+        return None, None
+    parent = rows[0]["sector_key"]
+    return parent, narrowing_note(name.strip(), parent)
+
+
 def get_country_etfs(country: str) -> dict:
-    """특정 국가에 투자하는 ETF 목록을 반환한다.
+    """특정 국가에 투자하는 ETF 목록을 반환한다. 대표 ETF와 대안들을 함께 준다.
+
+    "중국에 투자하고 싶어"처럼 투자처를 찾는 질문에 쓴다. 같은 국가라도 대형주·인터넷·
+    기술 등 담는 종목이 달라서, 보유 종목(get_top_holdings)을 함께 보면 차이를 설명할 수 있다.
 
     Args:
         country: 한국어 국가명 (예: "한국", "일본", "대만").
     """
+    # category='country'가 대표, 'country_alt'가 검증을 통과한 대안. 대표를 먼저 보여준다.
     rows = _rows(
         "SELECT ticker, name, country, ret_3mo, ret_1y, updated_at FROM etfs"
-        " WHERE category = ? AND country = ?",
-        ("country", country.strip()),
+        " WHERE category IN ('country','country_alt') AND country = ?"
+        " ORDER BY category = 'country' DESC, ticker",
+        (country.strip(),),
     )
     if not rows:
         return {"found": False, "reason": f"'{country}' 국가의 ETF는 제공된 데이터에 없습니다."}
@@ -83,13 +115,13 @@ def rank_countries_by_sector(sector: str, top_n: int = 10) -> dict:
     """특정 섹터 비중이 높은 국가를 순위로 반환한다 (역방향 조회).
 
     Args:
-        sector: 한국어 섹터명 (예: "반도체", "금융", "에너지").
+        sector: 사용자가 말한 단어를 그대로 넘기세요. 섹터명("금융")이든 산업명("게임",
+            "카지노")이든 도구가 상위 섹터로 알아서 올립니다.
         top_n: 반환할 국가 수.
     """
-    key = resolve_sector(sector)
+    key, note = _sector_or_parent(sector)
     if key is None:
-        return {"found": False,
-                "reason": f"'{sector}' 섹터는 제공된 데이터에 없습니다. 지원 섹터: {', '.join(SECTOR_KO_NAMES.values())}"}
+        return {"found": False, "reason": _UNKNOWN_SECTOR.format(name=sector)}
     # category='country' 필터 필수: 섹터 ETF(XLK)는 technology 99%라 순위를 독식한다.
     rows = _rows(
         "SELECT e.ticker, e.country, s.weight FROM sector_weights s"
@@ -102,8 +134,8 @@ def rank_countries_by_sector(sector: str, top_n: int = 10) -> dict:
         return {"found": False, "reason": f"'{sector}' 섹터 비중 데이터가 없습니다."}
     result = {"found": True, "sector": sector, "sector_key": key,
               "sector_ko": SECTOR_KO_NAMES.get(key, key), "ranking": rows}
-    if sector in ("반도체",):
-        result["approximation_note"] = "반도체 단독 데이터가 없어 기술(정보기술) 섹터 기준으로 근사했습니다."
+    if note:
+        result["approximation_note"] = note
     return result
 
 
@@ -111,12 +143,12 @@ def get_sector_etf(sector: str) -> dict:
     """특정 섹터에 투자하는 미국 SPDR 섹터 ETF를 반환한다.
 
     Args:
-        sector: 한국어 섹터명 (예: "반도체", "금융").
+        sector: 사용자가 말한 단어를 그대로 넘기세요. 섹터명("금융")이든 산업명("게임",
+            "카지노")이든 도구가 상위 섹터로 알아서 올립니다.
     """
-    key = resolve_sector(sector)
+    key, note = _sector_or_parent(sector)
     if key is None:
-        return {"found": False,
-                "reason": f"'{sector}' 섹터는 제공된 데이터에 없습니다. 지원 섹터: {', '.join(SECTOR_KO_NAMES.values())}"}
+        return {"found": False, "reason": _UNKNOWN_SECTOR.format(name=sector)}
     ticker = sector_etf_for(key)
     rows = _rows("SELECT ticker, name, ret_3mo, ret_1y, updated_at FROM etfs WHERE ticker = ?",
                  (ticker,)) if ticker else []
@@ -127,8 +159,12 @@ def get_sector_etf(sector: str) -> dict:
                     (key, rows[0]["ticker"]))
     result = {"found": True, "sector": sector, "sector_ko": SECTOR_KO_NAMES.get(key, key),
               "etf": rows[0], "related_etfs": related}
-    if sector in ("반도체",):
-        result["approximation_note"] = "반도체 전용 ETF는 없어 기술 섹터 ETF(XLK)로 근사했습니다."
+    # 대표 ETF는 섹터 전체 상품이다. 더 좁게 투자하는 상품(예: 반도체의 SMH·SOXX)이
+    # related_etfs에 있을 수 있으므로 "전용 ETF가 없다"고 단정하지 않는다.
+    if note:
+        result["approximation_note"] = (
+            f"{note} 대표 ETF({rows[0]['ticker']})도 섹터 전체에 투자합니다."
+            + (" 더 좁게 투자하는 상품은 관련 ETF 목록을 확인하세요." if related else ""))
     return result
 
 
@@ -154,12 +190,12 @@ def get_sector_landscape(sector: str) -> dict:
     시장 전체 섹터 구조 질문에 쓴다. 특정 ETF의 보유 구성(get_top_holdings)과는 다르다.
 
     Args:
-        sector: 한국어 섹터명 (예: "기술", "금융", "헬스케어").
+        sector: 사용자가 말한 단어를 그대로 넘기세요. 섹터명("기술")이든 산업명("게임",
+            "카지노")이든 도구가 상위 섹터로 알아서 올려 그 섹터의 산업 구조를 보여줍니다.
     """
-    key = resolve_sector(sector)
+    key, note = _sector_or_parent(sector)
     if key is None:
-        return {"found": False,
-                "reason": f"'{sector}' 섹터는 제공된 데이터에 없습니다. 지원 섹터: {', '.join(SECTOR_KO_NAMES.values())}"}
+        return {"found": False, "reason": _UNKNOWN_SECTOR.format(name=sector)}
     industries = _rows(
         "SELECT industry_key, industry_name, weight FROM sector_industries"
         " WHERE sector_key = ? ORDER BY weight DESC", (key,))
@@ -172,8 +208,8 @@ def get_sector_landscape(sector: str) -> dict:
     result = {"found": True, "sector": sector,
               "sector_ko": SECTOR_KO_NAMES.get(key, key), "industries": industries,
               "note": "시장 전체 섹터 기준(시총가중)이며, 특정 ETF의 보유 구성이 아닙니다."}
-    if sector in ("반도체",):
-        result["approximation_note"] = "'반도체'는 기술 섹터 전체로 조회했습니다. 세부 산업의 'Semiconductors'를 보세요."
+    if note:
+        result["approximation_note"] = f"{note} 세부 산업 목록에서 해당 산업을 찾아보세요."
     return result
 
 

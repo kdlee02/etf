@@ -5,6 +5,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from etf_agent import agent
+from etf_agent.universe import sector_approximation
 
 
 def tool_call(call_id, name, args):
@@ -61,6 +62,70 @@ def test_tool_calls_are_paired_by_id(fake, monkeypatch):
     answer = agent.ask("EWY 알려줘")
     assert [c.name for c in answer.tool_calls] == ["get_top_holdings", "get_sector_weights"]
     assert [c.result["who"] for c in answer.tool_calls] == ["holdings", "sectors"]
+
+
+def test_approximation_note_is_added_when_model_omits_it(fake, monkeypatch):
+    """모델이 근사 고지를 빼먹어도 코드가 붙인다.
+
+    프롬프트로도 지시하지만 _with_disclaimer와 같은 이유로 코드가 보장한다 —
+    빠지면 사용자는 정보기술 섹터 수치를 반도체 수치로 읽는다.
+    """
+    note = sector_approximation("반도체")  # 실제 도구가 주는 문자열 그대로
+    monkeypatch.setattr(agent, "TOOLS", [
+        lambda sector: {"found": True, "ranking": [], "approximation_note": note}])
+    agent.TOOLS[0].__name__ = "rank_countries_by_sector"
+    fake(
+        FakeMessage(content="scoped"),
+        FakeMessage(tool_calls=[tool_call("c1", "rank_countries_by_sector", {"sector": "반도체"})]),
+        FakeMessage(content="대만이 1위입니다."),  # 모델이 고지를 빠뜨린 답변
+    )
+    answer = agent.ask("반도체 비중 높은 나라?")
+    assert note in answer.text
+
+
+def test_approximation_note_survives_model_rewriting_the_query(fake, monkeypatch):
+    """모델이 '은행'을 '금융'으로 바꿔 호출해도 고지가 붙는다.
+
+    도구가 받은 인자만 보면 가드가 우회된다 — 실측: solar가 '은행'을 '금융'으로 정규화해
+    도구는 근사인 줄 모르고, 사용자는 금융 섹터 전체 수치를 은행 비중으로 읽었다.
+    """
+    monkeypatch.setattr(agent, "TOOLS", [
+        lambda sector, top_n=10: {"found": True, "ranking": [{"country": "싱가포르"}]}])
+    agent.TOOLS[0].__name__ = "rank_countries_by_sector"
+    fake(
+        FakeMessage(content="scoped"),
+        FakeMessage(tool_calls=[tool_call("c1", "rank_countries_by_sector", {"sector": "금융"})]),
+        FakeMessage(content="싱가포르가 1위입니다."),
+    )
+    text = agent.ask("은행 비중 높은 나라는?").text
+    assert "'은행'은" in text and "금융 섹터 전체" in text
+
+
+def test_no_approximation_note_when_narrowed_name_is_unrelated(fake, monkeypatch):
+    """질문에 세부 산업명이 있어도 다른 섹터를 조회했으면 고지를 붙이지 않는다."""
+    monkeypatch.setattr(agent, "TOOLS", [
+        lambda sector, top_n=10: {"found": True, "ranking": []}])
+    agent.TOOLS[0].__name__ = "rank_countries_by_sector"
+    fake(
+        FakeMessage(content="scoped"),
+        FakeMessage(tool_calls=[tool_call("c1", "rank_countries_by_sector", {"sector": "에너지"})]),
+        FakeMessage(content="노르웨이가 1위입니다."),
+    )
+    assert "세부 산업" not in agent.ask("은행 말고 에너지 비중 알려줘").text
+
+
+def test_approximation_note_not_duplicated_when_model_includes_it(fake, monkeypatch):
+    """모델이 이미 넣었으면 두 번 붙이지 않는다."""
+    note = sector_approximation("반도체")  # 실제 도구가 주는 문자열 그대로
+    monkeypatch.setattr(agent, "TOOLS", [
+        lambda sector: {"found": True, "ranking": [], "approximation_note": note}])
+    agent.TOOLS[0].__name__ = "rank_countries_by_sector"
+    fake(
+        FakeMessage(content="scoped"),
+        FakeMessage(tool_calls=[tool_call("c1", "rank_countries_by_sector", {"sector": "반도체"})]),
+        FakeMessage(content=f"대만이 1위입니다. {note}"),
+    )
+    assert agent.ask("반도체 비중 높은 나라?").text.count(note) == 1
 
 
 def test_tool_results_are_sent_back_with_matching_id(fake, monkeypatch):

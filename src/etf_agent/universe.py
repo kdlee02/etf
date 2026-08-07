@@ -78,7 +78,59 @@ INDUSTRY_KO_MAP = {
     "화학": ["chemicals"], "리츠": ["reit-diversified", "reit-residential", "reit-retail"],
 }
 
-ALL_TICKERS = list(COUNTRY_ETFS) + list(SECTOR_ETFS)
+# 국가별 추가 ETF **후보**. 여기 적혔다고 채택되는 게 아니다 — ingest가 대표 ETF와
+# 보유종목이 MIN_HOLDING_OVERLAP종목 이상 겹치는지 yfinance로 확인하고, 통과한 것만 저장한다.
+# 후보는 가설이고 판정은 데이터가 한다.
+#
+# 손으로 적는 이유: yfinance에 국가 단위 발굴 API가 없다. yf.Search("China ETF")는 7건뿐이고
+# FXI·KWEB을 안 주며, 펀드 스크리너(FundQuery)는 뮤추얼펀드만 반환한다(ETF 0건).
+# COUNTRY_ETFS 33종도 같은 방식으로 손으로 고른 것이라 새로 생긴 타협이 아니다.
+# ponytail: 커버리지는 best-effort. 검증에 걸리면 그 국가는 대표 1종만 남는다.
+COUNTRY_ETF_ALTS = {
+    "미국": ["VOO", "IVV", "VTI", "QQQ", "DIA", "IWM"],
+    "중국": ["FXI", "KWEB", "ASHR", "CQQQ", "GXC", "FLCH", "MCHK"],
+    "한국": ["FLKR"],
+    "일본": ["FLJP", "DXJ", "BBJP", "DFJ"],
+    "인도": ["INDY", "EPI", "FLIN", "SMIN", "PIN"],
+    "대만": ["FLTW"],
+    "브라질": ["FLBR", "EWZS"],
+    "독일": ["FLGR"],
+    "영국": ["FLGB"],
+    "프랑스": ["FLFR"],
+    "스위스": ["FLSW"],
+    "캐나다": ["FLCA"],
+    "호주": ["FLAU"],
+    "멕시코": ["FLMX"],
+    "홍콩": ["FLHK"],
+    "남아공": ["FLZA"],
+    "이탈리아": ["FLIY"],
+    "스페인": ["FLES"],
+    "싱가포르": ["FLSG"],
+    "말레이시아": ["FLM"],
+    "태국": ["FLTH"],
+}
+
+# 대표 ETF와 이만큼 겹쳐야 같은 국가 익스포저로 인정한다. 1은 우연히 겹칠 수 있다.
+# ponytail: A주 전용(ASHR)처럼 대표와 상장지가 달라 안 겹치는 상품은 놓친다 —
+# 놓치는 건 틀리는 것보다 낫다는 이 프로젝트 원칙(MIN_SCORE·reject)과 같은 선택.
+MIN_HOLDING_OVERLAP = 2
+
+ALL_TICKERS = (list(COUNTRY_ETFS) + list(SECTOR_ETFS)
+               + [t for alts in COUNTRY_ETF_ALTS.values() for t in alts])
+
+
+_ALT_COUNTRY = {t: ko for ko, alts in COUNTRY_ETF_ALTS.items() for t in alts}
+_PRIMARY_OF = {ko: tk for tk, ko in COUNTRY_ETFS.items()}
+
+
+def country_of(ticker: str) -> str | None:
+    """티커가 속한 국가(한국어). 대표든 추가 후보든 같은 국가를 돌려준다."""
+    return COUNTRY_ETFS.get(ticker) or _ALT_COUNTRY.get(ticker)
+
+
+def primary_etf_for(country: str) -> str | None:
+    """국가의 대표 ETF 티커. 추가 후보를 검증할 기준이다."""
+    return _PRIMARY_OF.get(country)
 
 
 def resolve_industry(name: str) -> list[str] | None:
@@ -93,6 +145,44 @@ def resolve_sector(name: str) -> str | None:
         return SECTOR_KO_MAP[key]
     snake = key.lower().replace(" ", "_")
     return snake if snake in SECTOR_KO_NAMES else None
+
+
+def _eun_neun(word: str) -> str:
+    """받침 있으면 '은', 없으면 '는'. 한글이 아니면 '는'. (은행'는' 같은 문장이 사용자에게 나간다)"""
+    last = word[-1:]
+    if not ("가" <= last <= "힣"):
+        return "는"
+    return "은" if (ord(last) - 0xAC00) % 28 else "는"
+
+
+def narrowed_names_in(text: str) -> list[str]:
+    """문장에 등장하는 '섹터로 물으면 좁혀지는' 이름들. 긴 이름 우선(반도체장비 > 반도체)."""
+    names = sorted(set(INDUSTRY_KO_MAP) & set(SECTOR_KO_MAP), key=len, reverse=True)
+    return [n for n in names if n in text]
+
+
+def sector_approximation(name: str) -> str | None:
+    """섹터로 해석했지만 실제로는 그 섹터의 세부 산업이면 고지 문구를, 아니면 None.
+
+    두 맵에 다 있으면 좁힘이다 — "반도체"는 섹터로 물으면 정보기술 전체로 답하고
+    산업으로 물으면 semiconductors로 답한다. 이름을 나열하지 않고 교집합으로 판정하는 이유:
+    반도체만 하드코딩했다가 리츠·은행·제약이 고지 없이 근사되고 있었다.
+    """
+    key = name.strip()
+    if not (key in INDUSTRY_KO_MAP and key in SECTOR_KO_MAP):
+        return None
+    return narrowing_note(key, SECTOR_KO_MAP[key])
+
+
+def narrowing_note(name: str, sector_key: str) -> str:
+    """'이건 세부 산업이고 수치는 상위 섹터 전체 기준'이라는 고지 문구.
+
+    상위 섹터를 인자로 받는다: 두 맵의 교집합(반도체·은행·제약·리츠)은 SECTOR_KO_MAP이
+    알려주지만, '게임'처럼 산업 맵에만 있는 이름은 부모를 DB(sector_industries)에서 찾아야 한다.
+    """
+    parent = SECTOR_KO_NAMES.get(sector_key, sector_key)
+    return (f"'{name}'{_eun_neun(name)} 별도 섹터가 아니라 {parent} 섹터의 세부 산업입니다. "
+            f"아래 수치는 {parent} 섹터 전체 기준입니다.")
 
 
 def sector_etf_for(sector_key: str) -> str | None:
