@@ -36,7 +36,9 @@ if st.sidebar.button("대화 지우기"):
     st.rerun()
 
 
-def render(entry):
+def render(entry, idx: int = 0):
+    """대화 1건을 그린다. idx는 위젯 key 접두사 — 같은 질문을 두 번 하면 차트·표의
+    자동 ID가 파라미터에서 생성돼 충돌한다(StreamlitDuplicateElementId)."""
     answer = entry["answer"]
     left, right = st.columns([2, 1])
     with left:
@@ -49,14 +51,16 @@ def render(entry):
             if not answer.grounded:
                 st.warning("도구 없이 생성된 답변입니다 — 수치는 검증되지 않았습니다.", icon="🎲")
             st.markdown(answer.text)
-            for call in answer.tool_calls:
+            for i, call in enumerate(answer.tool_calls):
                 fig, table = chart_for(call, dark=dark)
                 if fig is not None:
-                    st.plotly_chart(fig, width="stretch")
+                    st.plotly_chart(fig, width="stretch", key=f"fig-{idx}-{i}")
                     with st.expander("표로 보기"):
-                        st.dataframe(table, width="stretch", hide_index=True)
+                        st.dataframe(table, width="stretch", hide_index=True,
+                                     key=f"tbl-{idx}-{i}")
                 elif table:
-                    st.dataframe(table, width="stretch", hide_index=True)
+                    st.dataframe(table, width="stretch", hide_index=True,
+                                 key=f"tbl-{idx}-{i}")
             dates = [d for d in (as_of(c) for c in answer.tool_calls) if d]
             if dates:
                 latest = max(dates)
@@ -79,8 +83,8 @@ def render(entry):
                 st.json(call.result, expanded=False)
 
 
-for entry in st.session_state.history:
-    render(entry)
+for i, entry in enumerate(st.session_state.history):
+    render(entry, i)
 
 if not st.session_state.history:
     st.info("국가나 섹터로 ETF를 찾아보세요. 아래 예시를 눌러 시작할 수 있습니다.", icon="👋")
